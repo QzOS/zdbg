@@ -123,7 +123,8 @@ print_help(void)
 	    "  be n                 enable breakpoint\n"
 	    "  lm [addr]            list maps or show map at addr\n"
 	    "  g                    continue\n"
-	    "  t                    single step\n");
+	    "  t                    single step\n"
+	    "  p                    proceed / step over direct call\n");
 }
 
 static int
@@ -868,6 +869,167 @@ cmd_t(struct zdbg *d, struct toks *t)
 	return cmd_run_and_wait(d, 1);
 }
 
+/* --- p --------------------------------------------------------- */
+
+/*
+ * Step over a single direct call rel32 using a temporary
+ * breakpoint at the fallthrough address.  For non-call
+ * instructions p degrades to a single step.
+ *
+ * This also handles the case where the user is currently stopped
+ * on a permanent breakpoint placed exactly at the call: we skip
+ * the normal resume-from-bp dance (which single-steps INTO the
+ * call) and instead plant a temp bp at fallthrough, continue
+ * without reinstalling the permanent int3, and reinstall the
+ * permanent one after the temp fires.
+ */
+static int
+cmd_p_once(struct zdbg *d)
+{
+	uint8_t ibuf[16];
+	struct ztinydis dis;
+	zaddr_t fallthrough;
+	int temp_id = -1;
+	int preexisting_id;
+	int restore_perm_bp = -1;
+	struct zstop st;
+	int bp_id = -1;
+
+	if (!have_target(d) || !target_stopped(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	refresh_regs(d);
+	if (!d->have_regs) {
+		printf("no registers\n");
+		return -1;
+	}
+
+	if (ztarget_read(&d->target, d->regs.rip, ibuf, sizeof(ibuf)) < 0) {
+		printf("target operation not available in this backend yet\n");
+		return -1;
+	}
+	if (ztinydis_one(d->regs.rip, ibuf, sizeof(ibuf), &dis) < 0 ||
+	    dis.len == 0) {
+		return cmd_run_and_wait(d, 1);
+	}
+
+	/* Only step over direct call rel32; everything else is plain
+	 * single-step (which goes through the usual bp rearm path). */
+	if (!(dis.kind == ZINSN_CALL && dis.is_call && dis.has_target)) {
+		return cmd_run_and_wait(d, 1);
+	}
+
+	fallthrough = ztinydis_fallthrough(&dis);
+
+	/* If a breakpoint already exists at fallthrough we can reuse
+	 * it as-is (it is either installed and will fire, or disabled
+	 * and we must install a temp - but zbp_alloc would reuse the
+	 * slot so we keep the temp flag off).  Keep behavior simple:
+	 * only install our own temp if the slot is free. */
+	preexisting_id = zbp_find_by_addr(&d->bps, fallthrough);
+	if (preexisting_id < 0) {
+		temp_id = zbp_alloc(&d->bps, fallthrough, 1);
+		if (temp_id < 0) {
+			printf("breakpoint table full\n");
+			return -1;
+		}
+		if (zbp_enable(&d->target, &d->bps, temp_id) < 0) {
+			printf("temp breakpoint install failed\n");
+			(void)zbp_clear(&d->target, &d->bps, temp_id);
+			return -1;
+		}
+	} else if (d->bps.bp[preexisting_id].state != ZBP_ENABLED ||
+	    !d->bps.bp[preexisting_id].installed) {
+		/* Fallthrough collides with a known bp that is not
+		 * currently armed.  Install it for this proceed only;
+		 * we'll restore the previous logical state after. */
+		if (d->bps.bp[preexisting_id].state == ZBP_DISABLED) {
+			/* promote to a temp slot so we clear it afterwards */
+			d->bps.bp[preexisting_id].temporary = 1;
+			d->bps.bp[preexisting_id].state = ZBP_ENABLED;
+			if (zbp_install(&d->target, &d->bps,
+			    preexisting_id) < 0) {
+				printf("temp breakpoint install failed\n");
+				return -1;
+			}
+			temp_id = preexisting_id;
+		}
+	}
+
+	/* If we are stopped on a permanent breakpoint, skip the
+	 * internal single-step-and-reinstall path; the permanent bp
+	 * will be reinstalled by hand after the temp fires. */
+	if (d->stopped_bp >= 0 &&
+	    !d->bps.bp[d->stopped_bp].temporary &&
+	    d->bps.bp[d->stopped_bp].state == ZBP_ENABLED) {
+		restore_perm_bp = d->stopped_bp;
+		d->stopped_bp = -1;
+	}
+
+	if (ztarget_continue(&d->target) < 0) {
+		printf("continue failed\n");
+		return -1;
+	}
+	memset(&st, 0, sizeof(st));
+	if (ztarget_wait(&d->target, &st) < 0) {
+		printf("wait failed\n");
+		return -1;
+	}
+	zdbg_after_wait(d, &st, &bp_id);
+
+	/* Clean up our temp breakpoint if it is still present. */
+	if (temp_id >= 0) {
+		struct zbp *tb = &d->bps.bp[temp_id];
+		if (tb->state != ZBP_EMPTY && tb->temporary) {
+			if (d->stopped_bp == temp_id)
+				d->stopped_bp = -1;
+			(void)zbp_clear(&d->target, &d->bps, temp_id);
+		}
+	}
+
+	/* Reinstall permanent bp at the call site if we bypassed
+	 * the usual rearm path. */
+	if (restore_perm_bp >= 0) {
+		struct zbp *b = &d->bps.bp[restore_perm_bp];
+		if (b->state == ZBP_ENABLED && !b->installed)
+			(void)zbp_install(&d->target, &d->bps,
+			    restore_perm_bp);
+	}
+
+	if (st.reason == ZSTOP_BREAKPOINT && target_stopped(d) &&
+	    d->have_regs && d->regs.rip == fallthrough) {
+		printf("stopped: proceed rip=%016llx\n",
+		    (unsigned long long)fallthrough);
+	} else {
+		zstop_print(&st, bp_id);
+	}
+	return 0;
+}
+
+static int
+cmd_p(struct zdbg *d, struct toks *t)
+{
+	uint64_t count = 1;
+	uint64_t i;
+
+	if (t->n >= 2) {
+		if (zexpr_eval(t->v[1], &d->regs, &count) < 0 ||
+		    count == 0) {
+			printf("bad count\n");
+			return -1;
+		}
+	}
+	for (i = 0; i < count; i++) {
+		int rc = cmd_p_once(d);
+		if (rc < 0)
+			return rc;
+		if (!target_stopped(d))
+			break;
+	}
+	return 0;
+}
+
 /* --- lm -------------------------------------------------------- */
 static int
 cmd_lm(struct zdbg *d, struct toks *t)
@@ -1124,6 +1286,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_g(d, &t);
 	if (strcmp(mn, "t") == 0)
 		return cmd_t(d, &t);
+	if (strcmp(mn, "p") == 0)
+		return cmd_p(d, &t);
 	if (strcmp(mn, "l") == 0)
 		return cmd_l(d, &t);
 	if (strcmp(mn, "la") == 0)
