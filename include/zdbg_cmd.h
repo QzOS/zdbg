@@ -44,4 +44,19 @@ void zdbg_fini(struct zdbg *d);
 int  zcmd_exec(struct zdbg *d, const char *line);
 int  zrepl_run(struct zdbg *d);
 
+/*
+ * Quote-aware token splitter.  Reads `line`, copies tokens into
+ * `buf` (capacity `buflen` bytes) as a sequence of NUL-terminated
+ * strings, and stores pointers to each into argv[0..*argcp-1] up
+ * to `maxargv`.  Honors whitespace separators and "double-quoted"
+ * segments: quotes are stripped, and inside quotes a backslash
+ * escapes the next character literally so escape sequences such
+ * as \" and \\ survive into the caller for later interpretation.
+ *
+ * Returns 0 on success.  Returns -1 if argv would overflow
+ * (`maxargv`) or if buf would overflow (`buflen`).
+ */
+int  zcmd_split_quoted(const char *line, char *buf, size_t buflen,
+    char **argv, int maxargv, int *argcp);
+
 #endif /* ZDBG_CMD_H */
