@@ -168,6 +168,64 @@ main(void)
 		}
 	}
 
+	/*
+	 * Debug-register API smoke test.  Verifies plumbing of
+	 * get/set on DR0..DR7 via CONTEXT_DEBUG_REGISTERS without
+	 * actually continuing the target.  Skipped on non-x64
+	 * builds where the backend always returns -1.
+	 */
+	{
+		uint64_t dr7_save = 0;
+		uint64_t dr0_save = 0;
+		uint64_t v = 0;
+		int dr7_supported;
+
+		dr7_supported = (ztarget_get_debugreg(&tgt, 7, &dr7_save) == 0);
+		if (dr7_supported) {
+			if (ztarget_get_debugreg(&tgt, 0, &dr0_save) < 0) {
+				printf("FAIL: get DR0\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			/* DR4 and DR5 must be rejected. */
+			if (ztarget_get_debugreg(&tgt, 4, &v) == 0 ||
+			    ztarget_get_debugreg(&tgt, 5, &v) == 0) {
+				printf("FAIL: DR4/5 accepted\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			/* Round-trip DR0 with a sentinel value. */
+			if (ztarget_set_debugreg(&tgt, 0,
+			    (uint64_t)0x1000) < 0) {
+				printf("FAIL: set DR0\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			v = 0;
+			if (ztarget_get_debugreg(&tgt, 0, &v) < 0) {
+				printf("FAIL: readback DR0\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			if (v != (uint64_t)0x1000) {
+				printf("FAIL: DR0 readback mismatch\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			/* set_debugreg_all should also succeed. */
+			if (ztarget_set_debugreg_all(&tgt, 0,
+			    dr0_save) < 0) {
+				printf("FAIL: set_debugreg_all DR0\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			/* Restore DR7. */
+			(void)ztarget_set_debugreg_all(&tgt, 7, dr7_save);
+		} else {
+			printf("SKIP: debug-register API not available\n");
+		}
+	}
+
 	/* Kill and clean up regardless of current state. */
 	ztarget_kill(&tgt);
 	ztarget_fini(&tgt);
