@@ -34,6 +34,10 @@ add_executable(test_signal test_signal.c)
 target_link_libraries(test_signal PRIVATE zdbg_core)
 add_test(NAME test_signal COMMAND test_signal)
 
+add_executable(test_exception test_exception.c)
+target_link_libraries(test_exception PRIVATE zdbg_core)
+add_test(NAME test_exception COMMAND test_exception)
+
 add_executable(test_patch test_patch.c)
 target_link_libraries(test_patch PRIVATE zdbg_core)
 add_test(NAME test_patch COMMAND test_patch)

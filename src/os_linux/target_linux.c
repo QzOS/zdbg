@@ -1285,4 +1285,34 @@ ztarget_linux_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
 	return 0;
 }
 
+/*
+ * Pending Windows-exception control is not meaningful on Linux.
+ * Return -1 cleanly so the command layer can print a clear
+ * "unavailable on this backend" message.
+ */
+int
+ztarget_linux_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp)
+{
+	(void)t; (void)tid; (void)codep;
+	(void)first_chancep; (void)passp;
+	return -1;
+}
+
+int
+ztarget_linux_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass)
+{
+	(void)t; (void)tid; (void)code;
+	(void)first_chance; (void)pass;
+	return -1;
+}
+
+int
+ztarget_linux_clear_pending_exception(struct ztarget *t, uint64_t tid)
+{
+	(void)t; (void)tid;
+	return -1;
+}
+
 #endif /* __linux__ */

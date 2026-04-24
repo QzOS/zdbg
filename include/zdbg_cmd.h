@@ -12,6 +12,7 @@
 #include "zdbg_regs.h"
 #include "zdbg_maps.h"
 #include "zdbg_signal.h"
+#include "zdbg_exception.h"
 #include "zdbg_symbols.h"
 #include "zdbg_patch.h"
 
@@ -23,6 +24,7 @@ struct zdbg {
 	struct zmap_table maps;
 	struct zsym_table syms;
 	struct zsig_table sigs;
+	struct zexc_table excs;
 	struct zpatch_table patches;
 	zaddr_t dump_addr;
 	zaddr_t asm_addr;

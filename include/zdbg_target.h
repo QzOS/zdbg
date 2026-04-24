@@ -44,6 +44,14 @@ struct zstop {
 	 * the whole target has exited on the null backend).
 	 */
 	uint64_t tid;
+	/*
+	 * Windows first-chance flag for ZSTOP_EXCEPTION stops.
+	 * Set from EXCEPTION_DEBUG_INFO.dwFirstChance by the
+	 * Windows backend: 1 for first-chance, 0 for second-
+	 * chance.  Unused (zero) on other backends and for non-
+	 * exception stops.
+	 */
+	int first_chance;
 };
 
 /*
@@ -158,6 +166,39 @@ int ztarget_get_pending_signal(struct ztarget *t, uint64_t tid, int *sigp);
 int ztarget_set_pending_signal(struct ztarget *t, uint64_t tid, int sig);
 
 /*
+ * Pending Windows exception control for the selected or
+ * specified thread.  tid == 0 means "current selected thread".
+ * These are meaningful only on the Windows backend; every
+ * other backend returns -1 cleanly (no Windows Debug API
+ * pending exception exists).
+ *
+ * ztarget_get_pending_exception reports the Windows exception
+ * currently pending from WaitForDebugEvent.  *codep receives
+ * the Win32 ExceptionCode, *first_chancep receives
+ * EXCEPTION_DEBUG_INFO.dwFirstChance as 1/0, and *passp
+ * receives the current continuation state: 1 when the next
+ * ContinueDebugEvent will use DBG_EXCEPTION_NOT_HANDLED and 0
+ * for DBG_CONTINUE.  Returns 0 on success and -1 when no
+ * exception is pending or the backend is not Windows.
+ *
+ * ztarget_set_pending_exception updates only the continuation
+ * status for the pending exception: pass == 1 selects
+ * DBG_EXCEPTION_NOT_HANDLED, pass == 0 selects DBG_CONTINUE.
+ * The code/first_chance parameters must match the pending
+ * event; they are compared rather than used to invent a new
+ * exception (injection is not supported).
+ *
+ * ztarget_clear_pending_exception forces the pending event to
+ * continue with DBG_CONTINUE, i.e. the exception is treated
+ * as handled by the debugger and suppressed.
+ */
+int ztarget_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp);
+int ztarget_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass);
+int ztarget_clear_pending_exception(struct ztarget *t, uint64_t tid);
+
+/*
  * Backend entry points.  Implementations live in target_null.c,
  * os_linux/target_linux.c and os_windows/target_windows.c.  Only
  * one backend is active per build; src/target.c selects it.
@@ -188,6 +229,11 @@ int ztarget_null_get_pending_signal(struct ztarget *t, uint64_t tid,
     int *sigp);
 int ztarget_null_set_pending_signal(struct ztarget *t, uint64_t tid,
     int sig);
+int ztarget_null_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp);
+int ztarget_null_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass);
+int ztarget_null_clear_pending_exception(struct ztarget *t, uint64_t tid);
 
 #if defined(__linux__)
 int ztarget_linux_launch(struct ztarget *t, int argc, char **argv);
@@ -215,6 +261,11 @@ int ztarget_linux_get_pending_signal(struct ztarget *t, uint64_t tid,
     int *sigp);
 int ztarget_linux_set_pending_signal(struct ztarget *t, uint64_t tid,
     int sig);
+int ztarget_linux_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp);
+int ztarget_linux_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass);
+int ztarget_linux_clear_pending_exception(struct ztarget *t, uint64_t tid);
 #endif /* __linux__ */
 
 #if defined(_WIN32)
@@ -254,6 +305,11 @@ int ztarget_windows_get_pending_signal(struct ztarget *t, uint64_t tid,
     int *sigp);
 int ztarget_windows_set_pending_signal(struct ztarget *t, uint64_t tid,
     int sig);
+int ztarget_windows_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp);
+int ztarget_windows_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass);
+int ztarget_windows_clear_pending_exception(struct ztarget *t, uint64_t tid);
 
 /*
  * Fill *mt with one synthetic map per currently-loaded module
