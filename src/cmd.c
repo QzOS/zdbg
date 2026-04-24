@@ -135,7 +135,8 @@ print_help(void)
 	    "  bt [count]           frame-pointer backtrace\n"
 	    "  g                    continue\n"
 	    "  t                    single step\n"
-	    "  p                    proceed / step over direct call\n");
+	    "  p                    proceed / step over direct call\n"
+	    "  th [tid|index]       list/select traced thread\n");
 }
 
 static int
@@ -172,15 +173,42 @@ annot_addr(const struct zdbg *d, zaddr_t addr, char *buf, size_t buflen)
 	snprintf(buf, buflen, " <%s>", sbuf);
 }
 
+/*
+ * Build a "thread N" prefix when more than one traced thread is
+ * known.  On single-threaded sessions buf is left empty so the
+ * existing single-thread output is preserved.
+ */
+static void
+stop_thread_prefix(struct zdbg *d, const struct zstop *st, char *buf,
+    size_t buflen)
+{
+	int nth;
+
+	if (buf == NULL || buflen == 0)
+		return;
+	buf[0] = 0;
+	if (d == NULL || st == NULL)
+		return;
+	nth = ztarget_thread_count(&d->target);
+	if (nth <= 1)
+		return;
+	if (st->tid == 0)
+		return;
+	snprintf(buf, buflen, "thread %llu ",
+	    (unsigned long long)st->tid);
+}
+
 static void
 zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 {
 	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	char tp[64];
 	const char *reason = "stop";
 
 	if (st == NULL)
 		return;
 	annot_addr(d, st->addr, ann, sizeof(ann));
+	stop_thread_prefix((struct zdbg *)d, st, tp, sizeof(tp));
 	/*
 	 * If a hardware breakpoint/watchpoint fired, report it
 	 * distinctly from software breakpoints.  d->stopped_hwbp
@@ -192,15 +220,15 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 		const struct zhwbp *b = &d->hwbps.bp[d->stopped_hwbp];
 		char aann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
 		if (b->kind == ZHWBP_EXEC) {
-			printf("stopped: hardware breakpoint %d at %016llx%s\n",
-			    d->stopped_hwbp,
+			printf("stopped: %shardware breakpoint %d at %016llx%s\n",
+			    tp, d->stopped_hwbp,
 			    (unsigned long long)st->addr, ann);
 			return;
 		}
 		annot_addr(d, b->addr, aann, sizeof(aann));
-		printf("stopped: watchpoint %d %s addr=%016llx%s"
+		printf("stopped: %swatchpoint %d %s addr=%016llx%s"
 		    " rip=%016llx%s\n",
-		    d->stopped_hwbp,
+		    tp, d->stopped_hwbp,
 		    b->kind == ZHWBP_WRITE ? "write" : "read/write",
 		    (unsigned long long)b->addr, aann,
 		    (unsigned long long)st->addr, ann);
@@ -208,38 +236,41 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 	}
 	switch (st->reason) {
 	case ZSTOP_INITIAL:
-		printf("stopped: initial trap rip=%016llx%s\n",
-		    (unsigned long long)st->addr, ann);
+		printf("stopped: %sinitial trap rip=%016llx%s\n",
+		    tp, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_BREAKPOINT:
 		if (bp_id >= 0)
-			printf("stopped: breakpoint %d at %016llx%s\n",
-			    bp_id, (unsigned long long)st->addr, ann);
+			printf("stopped: %sbreakpoint %d at %016llx%s\n",
+			    tp, bp_id, (unsigned long long)st->addr, ann);
 		else
-			printf("stopped: breakpoint rip=%016llx%s\n",
-			    (unsigned long long)st->addr, ann);
+			printf("stopped: %sbreakpoint rip=%016llx%s\n",
+			    tp, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_SINGLESTEP:
-		printf("stopped: single-step rip=%016llx%s\n",
-		    (unsigned long long)st->addr, ann);
+		printf("stopped: %ssingle-step rip=%016llx%s\n",
+		    tp, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_SIGNAL:
-		printf("stopped: signal %d rip=%016llx%s\n", st->code,
-		    (unsigned long long)st->addr, ann);
+		printf("stopped: %ssignal %d rip=%016llx%s\n",
+		    tp, st->code, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXCEPTION:
-		printf("stopped: exception rip=%016llx%s\n",
-		    (unsigned long long)st->addr, ann);
+		printf("stopped: %sexception rip=%016llx%s\n",
+		    tp, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXIT:
-		printf("exited: code %d\n", st->code);
+		if (tp[0] != 0)
+			printf("exited: %scode %d\n", tp, st->code);
+		else
+			printf("exited: code %d\n", st->code);
 		return;
 	case ZSTOP_ERROR:
 		printf("stopped: error\n");
 		return;
 	case ZSTOP_NONE:
 	default:
-		printf("stopped: %s\n", reason);
+		printf("stopped: %s%s\n", tp, reason);
 		return;
 	}
 }
@@ -1198,6 +1229,13 @@ cmd_run_and_wait(struct zdbg *d, int step)
 			return -1;
 		}
 	} else {
+		/*
+		 * Reprogram hardware debug registers across every
+		 * currently-known traced thread before a full
+		 * continue.  This catches up threads discovered
+		 * via PTRACE_EVENT_CLONE during the previous run.
+		 */
+		(void)zhwbp_program(&d->target, &d->hwbps);
 		if (ztarget_continue(&d->target) < 0) {
 			printf("continue failed\n");
 			return -1;
@@ -1387,6 +1425,171 @@ cmd_p(struct zdbg *d, struct toks *t)
 		if (!target_stopped(d))
 			break;
 	}
+	return 0;
+}
+
+/* --- th -------------------------------------------------------- */
+
+/*
+ * Attempt to read RIP of the given thread by temporarily
+ * switching the backend selection.  Restores the previous
+ * selection before returning.  On failure *rip is left zero.
+ */
+static int
+read_thread_rip(struct zdbg *d, uint64_t tid, uint64_t *rip)
+{
+	uint64_t saved;
+	struct zregs r;
+
+	if (rip == NULL)
+		return -1;
+	*rip = 0;
+	saved = ztarget_current_thread(&d->target);
+	if (ztarget_select_thread(&d->target, tid) < 0)
+		return -1;
+	memset(&r, 0, sizeof(r));
+	if (ztarget_getregs(&d->target, &r) == 0)
+		*rip = r.rip;
+	/* restore previous selection best-effort */
+	if (saved != tid && saved != 0)
+		(void)ztarget_select_thread(&d->target, saved);
+	return 0;
+}
+
+static void
+print_thread_list(struct zdbg *d)
+{
+	int n;
+	int i;
+	uint64_t cur;
+
+	n = ztarget_thread_count(&d->target);
+	if (n <= 0) {
+		printf(" no traced threads\n");
+		return;
+	}
+	cur = ztarget_current_thread(&d->target);
+	for (i = 0; i < n; i++) {
+		struct zthread th;
+		const char *s;
+		char line[128];
+		char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+
+		if (ztarget_thread_get(&d->target, i, &th) < 0)
+			continue;
+		switch (th.state) {
+		case ZTHREAD_STOPPED:  s = "stopped"; break;
+		case ZTHREAD_RUNNING:  s = "running"; break;
+		case ZTHREAD_EXITED:   s = "exited "; break;
+		case ZTHREAD_EMPTY:
+		default:               s = "empty  "; break;
+		}
+		ann[0] = 0;
+		line[0] = 0;
+		if (th.state == ZTHREAD_STOPPED) {
+			uint64_t rip = 0;
+			if (read_thread_rip(d, th.tid, &rip) == 0 &&
+			    rip != 0) {
+				annot_addr(d, rip, ann, sizeof(ann));
+				snprintf(line, sizeof(line),
+				    "  rip=%016llx%s",
+				    (unsigned long long)rip, ann);
+			}
+		}
+		printf(" %c %d tid=%llu %s%s\n",
+		    (th.tid == cur) ? '*' : ' ', i,
+		    (unsigned long long)th.tid, s, line);
+	}
+}
+
+/*
+ * If a software breakpoint hit is still pending (int3 has been
+ * uninstalled and RIP corrected on the stopping thread),
+ * perform the internal single-step + reinstall on that thread
+ * *before* the user changes selection.  Returns 0 on success,
+ * -1 on error.
+ */
+static int
+settle_stopped_bp_before_switch(struct zdbg *d)
+{
+	int id;
+	struct zbp *b;
+	struct zstop st;
+
+	if (d->stopped_bp < 0)
+		return 0;
+	id = d->stopped_bp;
+	if (id < 0 || id >= ZDBG_MAX_BREAKPOINTS)
+		return 0;
+	b = &d->bps.bp[id];
+	d->stopped_bp = -1;
+	if (b->state != ZBP_ENABLED)
+		return 0;
+	if (b->temporary) {
+		(void)zbp_clear(&d->target, &d->bps, id);
+		return 0;
+	}
+	/* Selected thread is the stopping thread at this point. */
+	if (ztarget_singlestep(&d->target) < 0)
+		return -1;
+	memset(&st, 0, sizeof(st));
+	if (ztarget_wait(&d->target, &st) < 0)
+		return -1;
+	if (st.reason != ZSTOP_SINGLESTEP)
+		return 0;
+	if (b->state == ZBP_ENABLED && !b->installed)
+		(void)zbp_install(&d->target, &d->bps, id);
+	return 0;
+}
+
+static int
+cmd_th(struct zdbg *d, struct toks *t)
+{
+	uint64_t v;
+	int n;
+
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+
+	if (t->n == 1) {
+		print_thread_list(d);
+		return 0;
+	}
+
+	if (zexpr_eval(t->v[1], NULL, &v) < 0) {
+		printf("bad thread id\n");
+		return -1;
+	}
+
+	/* Try exact TID first. */
+	if (ztarget_select_thread(&d->target, v) == 0)
+		goto selected;
+
+	/* Fall back to index in the thread list. */
+	n = ztarget_thread_count(&d->target);
+	if ((int64_t)v >= 0 && (int)v < n) {
+		struct zthread th;
+		if (ztarget_thread_get(&d->target, (int)v, &th) == 0 &&
+		    th.tid != 0) {
+			if (ztarget_select_thread(&d->target, th.tid) == 0)
+				goto selected;
+		}
+	}
+	printf("no such thread: %s\n", t->v[1]);
+	return -1;
+
+selected:
+	/*
+	 * Settle any pending software breakpoint step before the
+	 * user leaves the stopping thread.  Best-effort.
+	 */
+	(void)settle_stopped_bp_before_switch(d);
+	/* Refresh cached regs from newly-selected stopped thread. */
+	refresh_regs(d);
+	printf("selected thread %llu\n",
+	    (unsigned long long)ztarget_current_thread(&d->target));
 	return 0;
 }
 
@@ -1883,6 +2086,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_addr(d, &t);
 	if (strcmp(mn, "bt") == 0)
 		return cmd_bt(d, &t);
+	if (strcmp(mn, "th") == 0)
+		return cmd_th(d, &t);
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;

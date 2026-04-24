@@ -45,6 +45,7 @@ ztarget_null_wait(struct ztarget *t, struct zstop *st)
 		st->reason = ZSTOP_ERROR;
 		st->addr = 0;
 		st->code = 0;
+		st->tid = 0;
 	}
 	return -1;
 }
@@ -110,4 +111,47 @@ ztarget_null_set_debugreg(struct ztarget *t, int regno, uint64_t v)
 {
 	(void)t; (void)regno; (void)v;
 	return -1;
+}
+
+int
+ztarget_null_set_debugreg_all(struct ztarget *t, int regno, uint64_t v)
+{
+	(void)t; (void)regno; (void)v;
+	return -1;
+}
+
+int
+ztarget_null_thread_count(struct ztarget *t)
+{
+	(void)t;
+	return 0;
+}
+
+int
+ztarget_null_thread_get(struct ztarget *t, int idx, struct zthread *out)
+{
+	(void)t; (void)idx; (void)out;
+	return -1;
+}
+
+int
+ztarget_null_select_thread(struct ztarget *t, uint64_t tid)
+{
+	(void)t; (void)tid;
+	return -1;
+}
+
+uint64_t
+ztarget_null_current_thread(struct ztarget *t)
+{
+	if (t == NULL)
+		return 0;
+	return t->tid;
+}
+
+int
+ztarget_null_refresh_threads(struct ztarget *t)
+{
+	(void)t;
+	return 0;
 }

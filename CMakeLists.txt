@@ -54,5 +54,21 @@ if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
     target_compile_options(testprog PRIVATE -O0 -g -fno-omit-frame-pointer)
 endif()
 
+# Multi-threaded example for manual thread-awareness sessions
+# and the optional Linux thread integration test.  Pthreads is
+# the only external dependency, added just for this target.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    find_package(Threads REQUIRED)
+    add_executable(testthreads examples/testthreads.c)
+    set_target_properties(testthreads PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+    target_link_libraries(testthreads PRIVATE Threads::Threads)
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
+       CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(testthreads PRIVATE
+            -O0 -g -fno-omit-frame-pointer)
+    endif()
+endif()
+
 enable_testing()
 add_subdirectory(tests)

@@ -31,16 +31,31 @@ Windows.
   there is no DWARF/`.eh_frame` unwinding.  Frames without
   preserved frame pointers (e.g. much of libc compiled with
   `-fomit-frame-pointer`) terminate the trace.
-* Hardware breakpoints/watchpoints: Linux x86-64 single-task
-  DR0-DR7 support for execute, write, and read/write
-  watchpoints.  Four slots only.  Not propagated to other
-  threads.
+* Hardware breakpoints/watchpoints: Linux x86-64 DR0-DR7
+  support for execute, write, and read/write watchpoints.
+  Four slots only.  zdbg programs the hardware debug
+  registers into **every known traced thread** before each
+  resume, so watchpoints fire on any thread that writes the
+  watched address.  Very newly-cloned threads may run briefly
+  without DR state until the next ptrace stop is observed.
 * Proceed/step-over (`p`) only supports direct `call rel32`
   initially.  Indirect calls and complex instruction decoding
   remain out of scope.
-* Thread handling: single traced task only; no clone/fork
-  following, no `PTRACE_O_TRACECLONE`, no `/proc/<pid>/task`
-  enumeration on attach.
+* Thread awareness: Linux backend tracks multiple traced
+  threads, supports `th` list/select, sets
+  `PTRACE_O_TRACECLONE` on launch, attaches to every TID under
+  `/proc/<pid>/task` on attach, uses `waitpid(-1, __WALL)` to
+  observe events from any traced thread, and follows
+  `PTRACE_EVENT_CLONE` so newly-born worker threads are added
+  to the table automatically.  `g` continues all stopped
+  non-exited threads; `t` single-steps the selected thread
+  only and tries to keep other threads paused (best-effort
+  all-stop).  Stop output includes the stopping TID once more
+  than one thread is known.  This is still all-stop and
+  first-pass; software breakpoint rearm is best-effort and
+  not fully race-free in heavy multi-threaded targets, no
+  thread-specific breakpoints, no non-stop mode, no
+  fork/exec following.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 
 On non-Linux hosts every target-dependent command still prints
@@ -108,6 +123,7 @@ Run the debugger:
     g                    continue (waits for next stop)
     t                    single step (waits for next stop)
     p [count]            proceed / step over direct call
+    th [tid|index]       list/select traced thread
 
 Address expressions accept raw numbers (default hex), registers
 (`rip+10`), and — on Linux, after a target has been
@@ -159,15 +175,25 @@ The example target (`examples/testprog`) is built with
 `-fno-omit-frame-pointer` on GCC/Clang so manual sessions can
 see multi-frame traces.
 
-Hardware breakpoints/watchpoints apply only to the currently
-traced Linux task.  Multi-thread programs need per-thread
-debug-register programming and are not supported yet.  x86 has
-no read-only data watchpoint encoding, so `hw` accepts only
+Hardware breakpoints/watchpoints are per-thread on x86: zdbg
+programs DR0..DR7 into every currently-known traced thread
+before each resume so watchpoints trigger regardless of which
+thread writes the watched address.  Newly-cloned threads may
+execute briefly without DR state until the backend observes
+the next ptrace stop and reprograms them.  x86 has no
+read-only data watchpoint encoding, so `hw` accepts only
 `w` (write) and `rw` (read/write).  Data watchpoint lengths
 must be 1, 2, 4 or 8 bytes and the address must be naturally
 aligned (`addr % len == 0`).  Hardware execute breakpoints
 stop at the watched instruction without patching code with
 `0xcc`.
+
+Software breakpoint rearm in multi-threaded programs is
+best-effort and not fully race-free yet: between the trap and
+the internal single-step + reinstall, another thread can run
+briefly over the uninstalled byte.  Fixing this properly
+requires a stronger all-stop guarantee than the current
+backend provides.
 
 Typical session:
 
@@ -191,7 +217,9 @@ Typical session:
         os_linux/       Linux ptrace backend (real)
         os_windows/     Win32 Debug API backend (stubbed)
     tests/          CTest-driven unit tests
-    examples/       manual target programs (e.g. `testprog`)
+    examples/       manual target programs
+                     - testprog     single-threaded
+                     - testthreads  pthread-based, for `th` sessions
 
 Platform-specific headers are confined to the matching backend
 file; `<sys/ptrace.h>` only appears under `src/os_linux/` and

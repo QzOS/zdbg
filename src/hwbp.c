@@ -143,17 +143,17 @@ zhwbp_program(struct ztarget *t, const struct zhwbp_table *ht)
 	if (ht == NULL || !target_live(t))
 		return -1;
 	/* Program DR7 = 0 first so no stale slot fires mid-update. */
-	if (ztarget_set_debugreg(t, 7, 0) < 0)
+	if (ztarget_set_debugreg_all(t, 7, 0) < 0)
 		return -1;
 	for (i = 0; i < ZDBG_MAX_HWBP; i++) {
 		uint64_t a = 0;
 		if (ht->bp[i].state == ZHWBP_ENABLED)
 			a = (uint64_t)ht->bp[i].addr;
-		if (ztarget_set_debugreg(t, i, a) < 0)
+		if (ztarget_set_debugreg_all(t, i, a) < 0)
 			return -1;
 	}
 	dr7 = zhwbp_build_dr7(ht);
-	if (ztarget_set_debugreg(t, 7, dr7) < 0)
+	if (ztarget_set_debugreg_all(t, 7, dr7) < 0)
 		return -1;
 	return 0;
 }
@@ -218,11 +218,11 @@ zhwbp_clear_all(struct ztarget *t, struct zhwbp_table *ht)
 	for (i = 0; i < ZDBG_MAX_HWBP; i++)
 		memset(&ht->bp[i], 0, sizeof(ht->bp[i]));
 	if (target_live(t) && t->state == ZTARGET_STOPPED) {
-		/* best-effort: clear DR7 + DR0..DR3 + DR6 */
-		(void)ztarget_set_debugreg(t, 7, 0);
+		/* best-effort: clear DR7 + DR0..DR3 + DR6 in every thread */
+		(void)ztarget_set_debugreg_all(t, 7, 0);
 		for (i = 0; i < ZDBG_MAX_HWBP; i++)
-			(void)ztarget_set_debugreg(t, i, 0);
-		(void)ztarget_set_debugreg(t, 6, 0);
+			(void)ztarget_set_debugreg_all(t, i, 0);
+		(void)ztarget_set_debugreg_all(t, 6, 0);
 	}
 	return 0;
 }
