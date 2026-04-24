@@ -218,6 +218,15 @@ int ztarget_linux_set_pending_signal(struct ztarget *t, uint64_t tid,
 #endif /* __linux__ */
 
 #if defined(_WIN32)
+/*
+ * Forward-declared table types used by Windows-specific fill
+ * helpers.  Declared here (rather than via includes) to keep
+ * direction of header dependencies clean: target.h does not
+ * need to know about map/symbol internals; pointers are enough.
+ */
+struct zmap_table;
+struct zsym_table;
+
 int ztarget_windows_launch(struct ztarget *t, int argc, char **argv);
 int ztarget_windows_attach(struct ztarget *t, uint64_t pid);
 int ztarget_windows_detach(struct ztarget *t);
@@ -245,6 +254,27 @@ int ztarget_windows_get_pending_signal(struct ztarget *t, uint64_t tid,
     int *sigp);
 int ztarget_windows_set_pending_signal(struct ztarget *t, uint64_t tid,
     int sig);
+
+/*
+ * Fill *mt with one synthetic map per currently-loaded module
+ * recorded from Windows debug events.  Each map covers [base,
+ * base+SizeOfImage), offset=0, perms="r-xp", name=image path
+ * (best effort).  raw_file_offset_valid is always 0: PE images
+ * are mapped with section alignment/gaps, so file byte offsets
+ * are not simply addr - base.  Returns 0 on success and -1 if
+ * the target has no backend state.
+ */
+int ztarget_windows_fill_maps(struct ztarget *t, struct zmap_table *mt);
+
+/*
+ * Populate *st with PE export symbols from currently-loaded
+ * modules.  Parses IMAGE_EXPORT_DIRECTORY from target memory
+ * using module_base + RVA, skipping ordinal-only exports and
+ * forwarded exports (whose function RVA falls inside the
+ * export directory range).  Returns the number of modules
+ * scanned on success, -1 on argument error.
+ */
+int ztarget_windows_fill_syms(struct ztarget *t, struct zsym_table *st);
 #endif /* _WIN32 */
 
 #endif /* ZDBG_TARGET_H */

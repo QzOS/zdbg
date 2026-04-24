@@ -68,10 +68,56 @@ basename_of(const char *path)
 	if (path == NULL)
 		return NULL;
 	for (p = path; *p; p++) {
-		if (*p == '/')
+		if (*p == '/' || *p == '\\')
 			last = p + 1;
 	}
 	return last;
+}
+
+/*
+ * Case-insensitive string compare.  On Windows module/path
+ * matching is case-insensitive (C:\Windows\System32\KERNEL32.DLL
+ * vs `kernel32`).  On Linux we keep case-sensitive matching for
+ * backwards compatibility with existing /proc-based tests.
+ */
+static int
+name_eq(const char *a, const char *b)
+{
+#if defined(_WIN32)
+	while (*a && *b) {
+		int ca = (unsigned char)*a;
+		int cb = (unsigned char)*b;
+		if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+		if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+		if (ca != cb)
+			return 0;
+		a++; b++;
+	}
+	return *a == 0 && *b == 0;
+#else
+	return strcmp(a, b) == 0;
+#endif
+}
+
+static int
+name_neq(const char *a, const char *b, size_t n)
+{
+#if defined(_WIN32)
+	size_t i;
+	for (i = 0; i < n; i++) {
+		int ca = (unsigned char)a[i];
+		int cb = (unsigned char)b[i];
+		if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+		if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+		if (ca != cb)
+			return 1;
+		if (ca == 0)
+			return 0;
+	}
+	return 0;
+#else
+	return strncmp(a, b, n) != 0;
+#endif
 }
 
 void
@@ -161,6 +207,25 @@ zmaps_parse_line(const char *line, struct zmap *m)
 	m->start = start;
 	m->end = end;
 	m->offset = off;
+
+	/*
+	 * Linux /proc/<pid>/maps lines describe file-backed pages
+	 * (if the name looks like a path) such that the bytes at
+	 * m->offset + (addr - m->start) are the exact on-disk bytes.
+	 * Mark those entries raw-file-offset valid so `pw` may use
+	 * them.  Anonymous, bracketed ([heap]/[stack]/...) and
+	 * " (deleted)" entries are not safe to write back.
+	 */
+	if (m->name[0] != 0 && m->name[0] != '[') {
+		size_t nn = strlen(m->name);
+		const char *suf = " (deleted)";
+		size_t sl = strlen(suf);
+		int deleted = 0;
+		if (nn >= sl && memcmp(m->name + nn - sl, suf, sl) == 0)
+			deleted = 1;
+		if (!deleted)
+			m->raw_file_offset_valid = 1;
+	}
 	return 0;
 }
 
@@ -254,13 +319,13 @@ find_main(const struct zmap_table *mt)
 		if (has_exec(m) && first_file_x == NULL)
 			first_file_x = m;
 		if (mt->main_hint[0] &&
-		    strcmp(m->name, mt->main_hint) == 0) {
+		    name_eq(m->name, mt->main_hint)) {
 			if (hint_any == NULL)
 				hint_any = m;
 			if (has_exec(m) && hint_x == NULL)
 				hint_x = m;
 		} else if (hint_base != NULL &&
-		    strcmp(basename_of(m->name), hint_base) == 0) {
+		    name_eq(basename_of(m->name), hint_base)) {
 			if (has_exec(m) && base_x == NULL)
 				base_x = m;
 		}
@@ -288,7 +353,7 @@ basename_prefix_match(const char *base, const char *query)
 	size_t qn = strlen(query);
 	char sep;
 
-	if (strncmp(base, query, qn) != 0)
+	if (name_neq(base, query, qn))
 		return 0;
 	sep = base[qn];
 	if (sep == 0)
@@ -347,7 +412,7 @@ zmaps_find_module(const struct zmap_table *mt, const char *name,
 			continue;
 
 		/* exact full path or bracketed name */
-		if (strcmp(m->name, name) == 0) {
+		if (name_eq(m->name, name)) {
 			if (has_exec(m)) {
 				if (exact_path_x == NULL)
 					exact_path_x = m;
@@ -365,7 +430,7 @@ zmaps_find_module(const struct zmap_table *mt, const char *name,
 			continue;
 
 		b = basename_of(m->name);
-		if (strcmp(b, name) == 0) {
+		if (name_eq(b, name)) {
 			if (has_exec(m)) {
 				if (exact_base_x == NULL)
 					exact_base_x = m;
@@ -378,16 +443,14 @@ zmaps_find_module(const struct zmap_table *mt, const char *name,
 		if (basename_prefix_match(b, name)) {
 			if (has_exec(m)) {
 				if (prefix_x == NULL ||
-				    strcmp(basename_of(prefix_x->name), b)
-				    != 0) {
+				    !name_eq(basename_of(prefix_x->name), b)) {
 					prefix_count_x++;
 					if (prefix_x == NULL)
 						prefix_x = m;
 				}
 			} else {
 				if (prefix_any == NULL ||
-				    strcmp(basename_of(prefix_any->name), b)
-				    != 0) {
+				    !name_eq(basename_of(prefix_any->name), b)) {
 					prefix_count_any++;
 					if (prefix_any == NULL)
 						prefix_any = m;
@@ -440,7 +503,17 @@ zmaps_resolve(const struct zmap_table *mt, const char *name,
 	return 0;
 }
 
-#if !defined(__linux__)
+#if defined(_WIN32)
+int
+zmaps_refresh(struct ztarget *t, struct zmap_table *mt)
+{
+	if (mt == NULL)
+		return -1;
+	mt->count = 0;
+	mt->truncated = 0;
+	return ztarget_windows_fill_maps(t, mt);
+}
+#elif !defined(__linux__)
 int
 zmaps_refresh(struct ztarget *t, struct zmap_table *mt)
 {
