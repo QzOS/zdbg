@@ -186,6 +186,16 @@ Run the debugger:
     x [addr [len]]       alias for d
     e addr bytes...      write bytes
     f addr len bytes...  fill memory
+    s addr len bytes...  search explicit range for byte pattern
+    s -a|-r pattern      search all readable non-guard regions
+    s -m module pattern  search one module range
+    s -x|-w|-i pattern   restrict region search by perms or mem-type
+    s -str "text"        ASCII string pattern (\n \r \t \\ \" \xNN)
+    s -wstr "text"       UTF-16LE string pattern
+    s -u32 value         little-endian 32-bit value
+    s -u64 value         little-endian 64-bit value
+    s -ptr expr          pointer-sized value of expression
+    s -limit N           cap matches (default 64)
     u [addr [count]]     tiny unassemble
     a [addr]             tiny assemble
     pa addr len insn     patch instruction + NOP fill
@@ -271,6 +281,14 @@ Known limitations: instruction operands inside `a` / `pa` /
 interactive tiny assembly still accept only numbers and
 registers; symbol names are not resolved inside assembled
 instruction operands in this release.
+
+Memory search (`s`) is chunked and bounded.  Region search
+(`-a` / `-r` / `-m`) skips guard pages and silently skips
+unreadable pages; it stops at a default result limit of 64
+matches (override with `-limit N`).  Patterns are matched
+literally only — there is no regex, wildcard, type-aware,
+or disassembly-aware search.  Pointer-sized search (`-ptr`)
+assumes a 64-bit target.
 
 `bt` is frame-pointer based only; optimized code compiled with
 omitted frame pointers may produce short or incorrect traces.

@@ -46,6 +46,10 @@ add_executable(test_pe_file test_pe_file.c)
 target_link_libraries(test_pe_file PRIVATE zdbg_core)
 add_test(NAME test_pe_file COMMAND test_pe_file)
 
+add_executable(test_search test_search.c)
+target_link_libraries(test_search PRIVATE zdbg_core)
+add_test(NAME test_search COMMAND test_search)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_linux_target test_linux_target.c)
     target_link_libraries(test_linux_target PRIVATE zdbg_core)
