@@ -87,7 +87,7 @@ main(void)
 	    "SIGWINCH default policy wrong");
 	p = zsig_get_policy(&zt, 19); /* SIGSTOP */
 	CHECK(p != NULL && p->stop && !p->pass && p->print,
-	    "SIGSEGV default policy wrong");
+	    "SIGSTOP default policy wrong");
 	CHECK(zsig_get_policy(&zt, 0) == NULL,
 	    "policy for signal 0 should be NULL");
 	CHECK(zsig_get_policy(&zt, ZDBG_MAX_SIGNALS) == NULL,
