@@ -31,6 +31,7 @@
 
 #include <errno.h>
 #include <signal.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -550,6 +551,54 @@ ztarget_linux_setregs(struct ztarget *t, const struct zregs *r)
 	return 0;
 }
 
+/*
+ * Return the offset of u_debugreg[regno] inside struct user.
+ * PTRACE_PEEKUSER / PTRACE_POKEUSER take that offset as addr.
+ */
+static int
+zl_debugreg_offset(int regno, long *offp)
+{
+	if (regno < 0 || regno > 7 || offp == NULL)
+		return -1;
+	*offp = (long)offsetof(struct user, u_debugreg[regno]);
+	return 0;
+}
+
+int
+ztarget_linux_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
+{
+	struct zlinux_target *lt = zl_get(t);
+	long off;
+	long v;
+
+	if (lt == NULL || vp == NULL)
+		return -1;
+	if (zl_debugreg_offset(regno, &off) < 0)
+		return -1;
+	errno = 0;
+	v = ptrace(PTRACE_PEEKUSER, lt->pid, (void *)off, (void *)0);
+	if (v == -1 && errno != 0)
+		return -1;
+	*vp = (uint64_t)(unsigned long)v;
+	return 0;
+}
+
+int
+ztarget_linux_set_debugreg(struct ztarget *t, int regno, uint64_t v)
+{
+	struct zlinux_target *lt = zl_get(t);
+	long off;
+
+	if (lt == NULL)
+		return -1;
+	if (zl_debugreg_offset(regno, &off) < 0)
+		return -1;
+	if (ptrace(PTRACE_POKEUSER, lt->pid, (void *)off,
+	    (void *)(unsigned long)v) < 0)
+		return -1;
+	return 0;
+}
+
 #else /* !__x86_64__ */
 
 int
@@ -563,6 +612,20 @@ int
 ztarget_linux_setregs(struct ztarget *t, const struct zregs *r)
 {
 	(void)t; (void)r;
+	return -1;
+}
+
+int
+ztarget_linux_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
+{
+	(void)t; (void)regno; (void)vp;
+	return -1;
+}
+
+int
+ztarget_linux_set_debugreg(struct ztarget *t, int regno, uint64_t v)
+{
+	(void)t; (void)regno; (void)v;
 	return -1;
 }
 

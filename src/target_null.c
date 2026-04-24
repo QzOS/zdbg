@@ -97,3 +97,17 @@ ztarget_null_setregs(struct ztarget *t, const struct zregs *r)
 	(void)t; (void)r;
 	return -1;
 }
+
+int
+ztarget_null_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
+{
+	(void)t; (void)regno; (void)vp;
+	return -1;
+}
+
+int
+ztarget_null_set_debugreg(struct ztarget *t, int regno, uint64_t v)
+{
+	(void)t; (void)regno; (void)v;
+	return -1;
+}

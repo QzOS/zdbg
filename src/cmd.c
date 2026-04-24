@@ -14,6 +14,7 @@
 #include "zdbg.h"
 #include "zdbg_cmd.h"
 #include "zdbg_expr.h"
+#include "zdbg_hwbp.h"
 #include "zdbg_maps.h"
 #include "zdbg_mem.h"
 #include "zdbg_regs.h"
@@ -122,6 +123,12 @@ print_help(void)
 	    "  bc n|*               clear breakpoint\n"
 	    "  bd n                 disable breakpoint\n"
 	    "  be n                 enable breakpoint\n"
+	    "  hb addr              set hardware execute breakpoint\n"
+	    "  hw addr len w|rw     set hardware data watchpoint\n"
+	    "  hl                   list hardware breakpoints/watchpoints\n"
+	    "  hc n|*               clear hardware breakpoint/watchpoint\n"
+	    "  hd n                 disable hardware slot\n"
+	    "  he n                 enable hardware slot\n"
 	    "  lm [addr]            list maps or show map at addr\n"
 	    "  sym [filter|-r]      list/search/refresh ELF symbols\n"
 	    "  addr expr            show address, nearest symbol, mapping\n"
@@ -174,6 +181,31 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 	if (st == NULL)
 		return;
 	annot_addr(d, st->addr, ann, sizeof(ann));
+	/*
+	 * If a hardware breakpoint/watchpoint fired, report it
+	 * distinctly from software breakpoints.  d->stopped_hwbp
+	 * is set by zdbg_after_wait before zstop_print is called.
+	 */
+	if (st->reason == ZSTOP_BREAKPOINT && d != NULL &&
+	    d->stopped_hwbp >= 0 &&
+	    d->stopped_hwbp < ZDBG_MAX_HWBP) {
+		const struct zhwbp *b = &d->hwbps.bp[d->stopped_hwbp];
+		char aann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+		if (b->kind == ZHWBP_EXEC) {
+			printf("stopped: hardware breakpoint %d at %016llx%s\n",
+			    d->stopped_hwbp,
+			    (unsigned long long)st->addr, ann);
+			return;
+		}
+		annot_addr(d, b->addr, aann, sizeof(aann));
+		printf("stopped: watchpoint %d %s addr=%016llx%s"
+		    " rip=%016llx%s\n",
+		    d->stopped_hwbp,
+		    b->kind == ZHWBP_WRITE ? "write" : "read/write",
+		    (unsigned long long)b->addr, aann,
+		    (unsigned long long)st->addr, ann);
+		return;
+	}
 	switch (st->reason) {
 	case ZSTOP_INITIAL:
 		printf("stopped: initial trap rip=%016llx%s\n",
@@ -780,6 +812,230 @@ cmd_be(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- hb / hw / hl / hc / hd / he ------------------------------- */
+
+static int
+parse_hwbp_id(const char *s, int *idp)
+{
+	uint64_t v;
+	if (zexpr_eval(s, NULL, &v) < 0)
+		return -1;
+	if (v >= ZDBG_MAX_HWBP)
+		return -1;
+	*idp = (int)v;
+	return 0;
+}
+
+static void
+print_hwbp_summary(struct zdbg *d, int id)
+{
+	const struct zhwbp *b;
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	const char *kname;
+
+	if (id < 0 || id >= ZDBG_MAX_HWBP)
+		return;
+	b = &d->hwbps.bp[id];
+	annot_addr(d, b->addr, ann, sizeof(ann));
+	kname = (b->kind == ZHWBP_EXEC) ? "exec" :
+	    (b->kind == ZHWBP_WRITE) ? "write" : "readwrite";
+	printf("hw %d %s len=%d at %016llx%s\n", id, kname, b->len,
+	    (unsigned long long)b->addr, ann);
+}
+
+static int
+cmd_hb(struct zdbg *d, struct toks *t)
+{
+	zaddr_t addr;
+	int id;
+
+	if (t->n < 2) {
+		printf("usage: hb addr\n");
+		return -1;
+	}
+	if (eval_addr(d, t->v[1], &addr) < 0) {
+		printf("bad address\n");
+		return -1;
+	}
+	id = zhwbp_alloc(&d->hwbps, addr, ZHWBP_EXEC, 1);
+	if (id < 0) {
+		printf("hardware slots exhausted\n");
+		return -1;
+	}
+	if (have_target(d) && target_stopped(d)) {
+		if (zhwbp_enable(&d->target, &d->hwbps, id) < 0) {
+			printf("hardware breakpoint enable failed\n");
+			(void)zhwbp_clear(&d->target, &d->hwbps, id);
+			return -1;
+		}
+	} else {
+		d->hwbps.bp[id].state = ZHWBP_ENABLED;
+	}
+	print_hwbp_summary(d, id);
+	return 0;
+}
+
+static int
+parse_hw_kind(const char *s, enum zhwbp_kind *kp)
+{
+	if (strcmp(s, "w") == 0) {
+		*kp = ZHWBP_WRITE;
+		return 0;
+	}
+	if (strcmp(s, "rw") == 0) {
+		*kp = ZHWBP_READWRITE;
+		return 0;
+	}
+	return -1;
+}
+
+static int
+cmd_hw(struct zdbg *d, struct toks *t)
+{
+	zaddr_t addr;
+	uint64_t len;
+	enum zhwbp_kind kind;
+	int id;
+
+	if (t->n < 4) {
+		printf("usage: hw addr len w|rw\n");
+		return -1;
+	}
+	if (eval_addr(d, t->v[1], &addr) < 0) {
+		printf("bad address\n");
+		return -1;
+	}
+	if (zexpr_eval(t->v[2], &d->regs, &len) < 0) {
+		printf("bad length\n");
+		return -1;
+	}
+	/* r is rejected explicitly: x86 has no read-only watchpoint. */
+	if (strcmp(t->v[3], "r") == 0) {
+		printf("x86 has no read-only data watchpoint; use rw\n");
+		return -1;
+	}
+	if (parse_hw_kind(t->v[3], &kind) < 0) {
+		printf("bad type; use w or rw\n");
+		return -1;
+	}
+	if (len != 1 && len != 2 && len != 4 && len != 8) {
+		printf("bad length; must be 1, 2, 4, or 8\n");
+		return -1;
+	}
+	if ((addr % (zaddr_t)len) != 0) {
+		printf("unaligned address for len=%llu\n",
+		    (unsigned long long)len);
+		return -1;
+	}
+	id = zhwbp_alloc(&d->hwbps, addr, kind, (int)len);
+	if (id < 0) {
+		printf("hardware slots exhausted\n");
+		return -1;
+	}
+	if (have_target(d) && target_stopped(d)) {
+		if (zhwbp_enable(&d->target, &d->hwbps, id) < 0) {
+			printf("watchpoint enable failed\n");
+			(void)zhwbp_clear(&d->target, &d->hwbps, id);
+			return -1;
+		}
+	} else {
+		d->hwbps.bp[id].state = ZHWBP_ENABLED;
+	}
+	print_hwbp_summary(d, id);
+	return 0;
+}
+
+static int
+cmd_hl(struct zdbg *d, struct toks *t)
+{
+	int i;
+	int any = 0;
+
+	(void)t;
+	for (i = 0; i < ZDBG_MAX_HWBP; i++) {
+		const struct zhwbp *b = &d->hwbps.bp[i];
+		char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+		const char *s;
+		const char *kname;
+
+		if (b->state == ZHWBP_EMPTY)
+			continue;
+		s = (b->state == ZHWBP_ENABLED) ? "enabled " : "disabled";
+		kname = (b->kind == ZHWBP_EXEC) ? "exec     " :
+		    (b->kind == ZHWBP_WRITE) ? "write    " : "readwrite";
+		annot_addr(d, b->addr, ann, sizeof(ann));
+		printf(" %d %s %s len=%d %016llx%s\n", i, s, kname, b->len,
+		    (unsigned long long)b->addr, ann);
+		any = 1;
+	}
+	if (!any)
+		printf(" no hardware breakpoints\n");
+	return 0;
+}
+
+static int
+cmd_hc(struct zdbg *d, struct toks *t)
+{
+	int id;
+
+	if (t->n < 2) {
+		printf("usage: hc n|*\n");
+		return -1;
+	}
+	if (strcmp(t->v[1], "*") == 0) {
+		(void)zhwbp_clear_all(&d->target, &d->hwbps);
+		d->stopped_hwbp = -1;
+		return 0;
+	}
+	if (parse_hwbp_id(t->v[1], &id) < 0) {
+		printf("bad id\n");
+		return -1;
+	}
+	if (zhwbp_clear(&d->target, &d->hwbps, id) < 0)
+		return -1;
+	if (d->stopped_hwbp == id)
+		d->stopped_hwbp = -1;
+	return 0;
+}
+
+static int
+cmd_hd(struct zdbg *d, struct toks *t)
+{
+	int id;
+
+	if (t->n < 2 || parse_hwbp_id(t->v[1], &id) < 0) {
+		printf("usage: hd n\n");
+		return -1;
+	}
+	if (zhwbp_disable(&d->target, &d->hwbps, id) < 0) {
+		printf("disable failed\n");
+		return -1;
+	}
+	if (d->stopped_hwbp == id)
+		d->stopped_hwbp = -1;
+	return 0;
+}
+
+static int
+cmd_he(struct zdbg *d, struct toks *t)
+{
+	int id;
+
+	if (t->n < 2 || parse_hwbp_id(t->v[1], &id) < 0) {
+		printf("usage: he n\n");
+		return -1;
+	}
+	if (d->hwbps.bp[id].state == ZHWBP_EMPTY) {
+		printf("no hardware breakpoint %d\n", id);
+		return -1;
+	}
+	if (zhwbp_enable(&d->target, &d->hwbps, id) < 0) {
+		printf("enable failed\n");
+		return -1;
+	}
+	return 0;
+}
+
 /* --- g / t ----------------------------------------------------- */
 
 /*
@@ -799,6 +1055,7 @@ zdbg_after_wait(struct zdbg *d, struct zstop *st, int *bp_idp)
 
 	if (bp_idp != NULL)
 		*bp_idp = -1;
+	d->stopped_hwbp = -1;
 
 	if (target_stopped(d))
 		refresh_regs(d);
@@ -813,6 +1070,24 @@ zdbg_after_wait(struct zdbg *d, struct zstop *st, int *bp_idp)
 				*bp_idp = id;
 			/* keep cached regs consistent with target */
 			refresh_regs(d);
+			return;
+		}
+		/*
+		 * Software handler did not claim this SIGTRAP.  Try
+		 * the hardware DR6-based handler next.  On a hardware
+		 * execute breakpoint RIP is already at the watched
+		 * instruction, so we do not touch regs here.
+		 */
+		{
+			int hw_id = -1;
+			uint64_t dr6 = 0;
+			int hrc = zhwbp_handle_trap(&d->target, &d->hwbps,
+			    &hw_id, &dr6);
+			if (hrc == 1) {
+				d->stopped_hwbp = hw_id;
+				if (d->have_regs)
+					st->addr = d->regs.rip;
+			}
 		}
 	}
 }
@@ -1391,6 +1666,8 @@ cmd_l(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	printf("launched pid %llu\n", (unsigned long long)d->target.pid);
+	zhwbp_table_init(&d->hwbps);
+	d->stopped_hwbp = -1;
 	clear_maps(d);
 	clear_syms(d);
 	zmaps_set_main_hint(&d->maps, argv[0]);
@@ -1422,6 +1699,8 @@ cmd_la(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	printf("attached pid %llu\n", (unsigned long long)d->target.pid);
+	zhwbp_table_init(&d->hwbps);
+	d->stopped_hwbp = -1;
 	clear_maps(d);
 	clear_syms(d);
 	refresh_maps(d);
@@ -1438,12 +1717,17 @@ cmd_ld(struct zdbg *d, struct toks *t)
 		printf("no target\n");
 		return -1;
 	}
+	/* Best-effort: clear hardware debug registers in the target
+	 * before detaching so it does not keep stale breakpoints. */
+	(void)zhwbp_clear_all(&d->target, &d->hwbps);
 	if (ztarget_detach(&d->target) < 0) {
 		printf("detach failed\n");
 		return -1;
 	}
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
+	d->stopped_hwbp = -1;
+	zhwbp_table_init(&d->hwbps);
 	clear_maps(d);
 	clear_syms(d);
 	printf("detached\n");
@@ -1464,6 +1748,8 @@ cmd_k(struct zdbg *d, struct toks *t)
 	}
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
+	d->stopped_hwbp = -1;
+	zhwbp_table_init(&d->hwbps);
 	clear_maps(d);
 	clear_syms(d);
 	printf("killed\n");
@@ -1480,6 +1766,7 @@ zdbg_init(struct zdbg *d)
 	memset(d, 0, sizeof(*d));
 	ztarget_init(&d->target);
 	zbp_table_init(&d->bps);
+	zhwbp_table_init(&d->hwbps);
 	zregs_clear(&d->regs);
 	zmaps_init(&d->maps);
 	zsyms_init(&d->syms);
@@ -1489,6 +1776,7 @@ zdbg_init(struct zdbg *d)
 	d->have_maps = 0;
 	d->have_syms = 0;
 	d->stopped_bp = -1;
+	d->stopped_hwbp = -1;
 }
 
 void
@@ -1561,6 +1849,18 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_bd(d, &t);
 	if (strcmp(mn, "be") == 0)
 		return cmd_be(d, &t);
+	if (strcmp(mn, "hb") == 0)
+		return cmd_hb(d, &t);
+	if (strcmp(mn, "hw") == 0)
+		return cmd_hw(d, &t);
+	if (strcmp(mn, "hl") == 0)
+		return cmd_hl(d, &t);
+	if (strcmp(mn, "hc") == 0)
+		return cmd_hc(d, &t);
+	if (strcmp(mn, "hd") == 0)
+		return cmd_hd(d, &t);
+	if (strcmp(mn, "he") == 0)
+		return cmd_he(d, &t);
 	if (strcmp(mn, "g") == 0)
 		return cmd_g(d, &t);
 	if (strcmp(mn, "t") == 0)

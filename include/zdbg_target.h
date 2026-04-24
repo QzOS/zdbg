@@ -70,6 +70,15 @@ int ztarget_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_setregs(struct ztarget *t, const struct zregs *r);
 
 /*
+ * Debug register access.  regno selects DR0..DR7; only DR0..DR3,
+ * DR6 and DR7 are actually used by zdbg.  Returns 0 on success
+ * and -1 on failure or when the backend/platform does not
+ * support hardware debug registers.  The target must be stopped.
+ */
+int ztarget_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
+int ztarget_set_debugreg(struct ztarget *t, int regno, uint64_t v);
+
+/*
  * Backend entry points.  Implementations live in target_null.c,
  * os_linux/target_linux.c and os_windows/target_windows.c.  Only
  * one backend is active per build; src/target.c selects it.
@@ -88,6 +97,8 @@ int ztarget_null_write(struct ztarget *t, zaddr_t addr, const void *buf,
 int ztarget_null_flush_icache(struct ztarget *t, zaddr_t addr, size_t len);
 int ztarget_null_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_null_setregs(struct ztarget *t, const struct zregs *r);
+int ztarget_null_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
+int ztarget_null_set_debugreg(struct ztarget *t, int regno, uint64_t v);
 
 #if defined(__linux__)
 int ztarget_linux_launch(struct ztarget *t, int argc, char **argv);
@@ -103,6 +114,8 @@ int ztarget_linux_write(struct ztarget *t, zaddr_t addr, const void *buf,
 int ztarget_linux_flush_icache(struct ztarget *t, zaddr_t addr, size_t len);
 int ztarget_linux_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_linux_setregs(struct ztarget *t, const struct zregs *r);
+int ztarget_linux_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
+int ztarget_linux_set_debugreg(struct ztarget *t, int regno, uint64_t v);
 #endif /* __linux__ */
 
 #endif /* ZDBG_TARGET_H */

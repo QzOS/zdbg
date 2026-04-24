@@ -112,3 +112,15 @@ ztarget_setregs(struct ztarget *t, const struct zregs *r)
 {
 	return ZBACKEND(setregs)(t, r);
 }
+
+int
+ztarget_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
+{
+	return ZBACKEND(get_debugreg)(t, regno, vp);
+}
+
+int
+ztarget_set_debugreg(struct ztarget *t, int regno, uint64_t v)
+{
+	return ZBACKEND(set_debugreg)(t, regno, v);
+}

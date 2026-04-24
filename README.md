@@ -31,14 +31,17 @@ Windows.
   there is no DWARF/`.eh_frame` unwinding.  Frames without
   preserved frame pointers (e.g. much of libc compiled with
   `-fomit-frame-pointer`) terminate the trace.
+* Hardware breakpoints/watchpoints: Linux x86-64 single-task
+  DR0-DR7 support for execute, write, and read/write
+  watchpoints.  Four slots only.  Not propagated to other
+  threads.
 * Proceed/step-over (`p`) only supports direct `call rel32`
   initially.  Indirect calls and complex instruction decoding
   remain out of scope.
 * Thread handling: single traced task only; no clone/fork
   following, no `PTRACE_O_TRACECLONE`, no `/proc/<pid>/task`
   enumeration on attach.
-* No DWARF/PDB, no source-line debugging, no hardware
-  breakpoints or watchpoints, no remote debugging.
+* No DWARF/PDB, no source-line debugging, no remote debugging.
 
 On non-Linux hosts every target-dependent command still prints
 
@@ -55,7 +58,7 @@ deliberately avoids:
 * a full x86 assembler or disassembler
 * Capstone / Keystone / libbfd / LLVM
 * scripting, plugins, remote debugging, GUI
-* file patching, hardware breakpoints
+* file patching
 
 ## Build
 
@@ -92,6 +95,12 @@ Run the debugger:
     bc n|*               clear breakpoint
     bd n                 disable breakpoint
     be n                 enable breakpoint
+    hb addr              set hardware execute breakpoint
+    hw addr len w|rw     set hardware data watchpoint
+    hl                   list hardware breakpoints/watchpoints
+    hc n|*               clear hardware breakpoint/watchpoint
+    hd n                 disable hardware slot
+    he n                 enable hardware slot
     lm [addr]            list maps or show map containing address
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
     addr expr            show address, nearest symbol, containing map
@@ -149,6 +158,16 @@ omitted frame pointers may produce short or incorrect traces.
 The example target (`examples/testprog`) is built with
 `-fno-omit-frame-pointer` on GCC/Clang so manual sessions can
 see multi-frame traces.
+
+Hardware breakpoints/watchpoints apply only to the currently
+traced Linux task.  Multi-thread programs need per-thread
+debug-register programming and are not supported yet.  x86 has
+no read-only data watchpoint encoding, so `hw` accepts only
+`w` (write) and `rw` (read/write).  Data watchpoint lengths
+must be 1, 2, 4 or 8 bytes and the address must be naturally
+aligned (`addr % len == 0`).  Hardware execute breakpoints
+stop at the watched instruction without patching code with
+`0xcc`.
 
 Typical session:
 
