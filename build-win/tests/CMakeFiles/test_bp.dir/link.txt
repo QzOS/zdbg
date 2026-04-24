@@ -1,3 +1,0 @@
-/usr/local/bin/cmake -E rm -f CMakeFiles/test_bp.dir/objects.a
-/usr/bin/x86_64-w64-mingw32-ar qc CMakeFiles/test_bp.dir/objects.a @CMakeFiles/test_bp.dir/objects1.rsp
-/usr/bin/x86_64-w64-mingw32-gcc -Wl,--whole-archive CMakeFiles/test_bp.dir/objects.a -Wl,--no-whole-archive -o test_bp.exe -Wl,--out-implib,libtest_bp.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles/test_bp.dir/linkLibs.rsp

@@ -1,3 +1,0 @@
-/usr/local/bin/cmake -E rm -f CMakeFiles/testprog.dir/objects.a
-/usr/bin/x86_64-w64-mingw32-ar qc CMakeFiles/testprog.dir/objects.a @CMakeFiles/testprog.dir/objects1.rsp
-/usr/bin/x86_64-w64-mingw32-gcc -Wl,--whole-archive CMakeFiles/testprog.dir/objects.a -Wl,--no-whole-archive -o examples/testprog.exe -Wl,--out-implib,libtestprog.dll.a -Wl,--major-image-version,0,--minor-image-version,0 @CMakeFiles/testprog.dir/linkLibs.rsp
