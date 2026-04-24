@@ -25,6 +25,7 @@ set(ZDBG_CORE_SOURCES
     src/tinydis.c
     src/target.c
     src/target_null.c
+    src/signal.c
     src/cmd.c
     src/repl.c)
 
@@ -66,6 +67,15 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
        CMAKE_C_COMPILER_ID MATCHES "Clang")
         target_compile_options(testthreads PRIVATE
+            -O0 -g -fno-omit-frame-pointer)
+    endif()
+
+    add_executable(testsignals examples/testsignals.c)
+    set_target_properties(testsignals PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+    if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
+       CMAKE_C_COMPILER_ID MATCHES "Clang")
+        target_compile_options(testsignals PRIVATE
             -O0 -g -fno-omit-frame-pointer)
     endif()
 endif()

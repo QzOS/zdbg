@@ -160,3 +160,15 @@ ztarget_refresh_threads(struct ztarget *t)
 {
 	return ZBACKEND(refresh_threads)(t);
 }
+
+int
+ztarget_get_pending_signal(struct ztarget *t, uint64_t tid, int *sigp)
+{
+	return ZBACKEND(get_pending_signal)(t, tid, sigp);
+}
+
+int
+ztarget_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
+{
+	return ZBACKEND(set_pending_signal)(t, tid, sig);
+}

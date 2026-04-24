@@ -18,6 +18,7 @@
 #include "zdbg_maps.h"
 #include "zdbg_mem.h"
 #include "zdbg_regs.h"
+#include "zdbg_signal.h"
 #include "zdbg_symbols.h"
 #include "zdbg_target.h"
 #include "zdbg_tinyasm.h"
@@ -136,7 +137,9 @@ print_help(void)
 	    "  g                    continue\n"
 	    "  t                    single step\n"
 	    "  p                    proceed / step over direct call\n"
-	    "  th [tid|index]       list/select traced thread\n");
+	    "  th [tid|index]       list/select traced thread\n"
+	    "  sig [-l|0|name|num]  show/list/clear/set pending signal\n"
+	    "  handle [sig [opts]]  show/set signal stop/pass/print policy\n");
 }
 
 static int
@@ -252,8 +255,9 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 		    tp, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_SIGNAL:
-		printf("stopped: %ssignal %d rip=%016llx%s\n",
-		    tp, st->code, (unsigned long long)st->addr, ann);
+		printf("stopped: %ssignal %s(%d) rip=%016llx%s\n",
+		    tp, zsig_name(st->code), st->code,
+		    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXCEPTION:
 		printf("stopped: %sexception rip=%016llx%s\n",
@@ -1202,6 +1206,14 @@ zdbg_resume_from_bp(struct zdbg *d, int user_singlestep)
  * Run-until-stop helper shared by g and t.  After the ptrace
  * resume the command layer always waits and reports the stop,
  * so the REPL returns with the target either stopped or exited.
+ *
+ * On ZSTOP_SIGNAL the user's signal policy (struct zsig_table)
+ * is consulted: the signal is printed when policy.print is set,
+ * the pending signal is cleared when policy.pass is not set
+ * (otherwise the backend will redeliver it on next continue),
+ * and the loop auto-continues when policy.stop is not set so
+ * noisy signals such as SIGCHLD/SIGWINCH never surface at the
+ * prompt.  Breakpoint and single-step stops are unaffected.
  */
 static int
 cmd_run_and_wait(struct zdbg *d, int step)
@@ -1241,14 +1253,60 @@ cmd_run_and_wait(struct zdbg *d, int step)
 			return -1;
 		}
 	}
-	memset(&st, 0, sizeof(st));
-	if (ztarget_wait(&d->target, &st) < 0) {
-		printf("wait failed\n");
-		return -1;
+
+	for (;;) {
+		memset(&st, 0, sizeof(st));
+		if (ztarget_wait(&d->target, &st) < 0) {
+			printf("wait failed\n");
+			return -1;
+		}
+		zdbg_after_wait(d, &st, &bp_id);
+
+		if (st.reason == ZSTOP_SIGNAL) {
+			const struct zsig_policy *p;
+			int sig = st.code;
+			int do_stop = 1;
+			int do_print = 1;
+			int do_pass = 1;
+
+			p = zsig_get_policy(&d->sigs, sig);
+			if (p != NULL) {
+				do_stop = p->stop ? 1 : 0;
+				do_print = p->print ? 1 : 0;
+				do_pass = p->pass ? 1 : 0;
+			}
+			if (!do_pass)
+				(void)ztarget_set_pending_signal(&d->target,
+				    st.tid, 0);
+			if (!do_stop) {
+				if (do_print) {
+					char tp[64];
+					stop_thread_prefix(d, &st, tp,
+					    sizeof(tp));
+					printf("signal: %s%s(%d) passed\n",
+					    tp, zsig_name(sig), sig);
+				}
+				/* auto-continue and keep waiting */
+				(void)zhwbp_program(&d->target, &d->hwbps);
+				if (ztarget_continue(&d->target) < 0) {
+					printf("continue failed\n");
+					return -1;
+				}
+				continue;
+			}
+			if (do_print) {
+				zstop_print(d, &st, bp_id);
+				if (do_pass && sig > 0)
+					printf("pending: %s will be "
+					    "delivered on continue\n",
+					    zsig_name(sig));
+			}
+			return 0;
+		}
+
+		zstop_print(d, &st, bp_id);
+		return 0;
 	}
-	zdbg_after_wait(d, &st, &bp_id);
-	zstop_print(d, &st, bp_id);
-	return 0;
 }
 
 static int
@@ -1959,6 +2017,137 @@ cmd_k(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- sig / handle ---------------------------------------------- */
+
+static int
+cmd_sig(struct zdbg *d, struct toks *t)
+{
+	int sig = 0;
+	int cur = 0;
+	uint64_t tid;
+	const struct zsig_policy *p;
+
+	if (t->n >= 2 && strcmp(t->v[1], "-l") == 0) {
+		int i;
+		for (i = 1; i < ZDBG_MAX_SIGNALS; i++) {
+			const char *name = zsig_name(i);
+			if (strcmp(name, "SIG?") == 0)
+				continue;
+			printf(" %3d %s\n", i, name);
+		}
+		return 0;
+	}
+
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (!target_stopped(d)) {
+		printf("target not stopped\n");
+		return -1;
+	}
+
+	tid = ztarget_current_thread(&d->target);
+
+	if (t->n == 1) {
+		if (ztarget_get_pending_signal(&d->target, 0, &cur) < 0) {
+			printf("pending signal not available\n");
+			return -1;
+		}
+		if (cur == 0) {
+			printf("thread %llu pending signal: none\n",
+			    (unsigned long long)tid);
+			return 0;
+		}
+		p = zsig_get_policy(&d->sigs, cur);
+		printf("thread %llu pending signal: %s(%d), pass=%s\n",
+		    (unsigned long long)tid, zsig_name(cur), cur,
+		    (p != NULL && p->pass) ? "yes" : "no");
+		return 0;
+	}
+
+	if (zsig_parse(t->v[1], &sig) < 0) {
+		printf("unknown signal: %s\n", t->v[1]);
+		return -1;
+	}
+	if (ztarget_set_pending_signal(&d->target, 0, sig) < 0) {
+		printf("pending signal set not available\n");
+		return -1;
+	}
+	if (sig == 0)
+		printf("pending signal cleared\n");
+	else
+		printf("pending signal set to %s(%d)\n",
+		    zsig_name(sig), sig);
+	return 0;
+}
+
+/*
+ * Parse one stop/pass/print option token into set flag and
+ * value pair.  Returns 0 on match, -1 on unknown word.
+ */
+static int
+parse_handle_opt(const char *s,
+    int *set_stop, int *stop,
+    int *set_pass, int *pass,
+    int *set_print, int *print)
+{
+	if (strcmp(s, "stop") == 0)     { *set_stop = 1;  *stop = 1;  return 0; }
+	if (strcmp(s, "nostop") == 0)   { *set_stop = 1;  *stop = 0;  return 0; }
+	if (strcmp(s, "pass") == 0)     { *set_pass = 1;  *pass = 1;  return 0; }
+	if (strcmp(s, "nopass") == 0)   { *set_pass = 1;  *pass = 0;  return 0; }
+	if (strcmp(s, "print") == 0)    { *set_print = 1; *print = 1; return 0; }
+	if (strcmp(s, "noprint") == 0)  { *set_print = 1; *print = 0; return 0; }
+	return -1;
+}
+
+static int
+cmd_handle(struct zdbg *d, struct toks *t)
+{
+	int sig = 0;
+	const struct zsig_policy *p;
+	int set_stop = 0, set_pass = 0, set_print = 0;
+	int stop = 0, pass = 0, print = 0;
+	int i;
+
+	if (t->n == 1) {
+		zsig_print_table(&d->sigs);
+		return 0;
+	}
+	if (zsig_parse(t->v[1], &sig) < 0 || sig == 0) {
+		printf("unknown signal: %s\n", t->v[1]);
+		return -1;
+	}
+	if (t->n == 2) {
+		p = zsig_get_policy(&d->sigs, sig);
+		if (p == NULL) {
+			printf("unknown signal: %s\n", t->v[1]);
+			return -1;
+		}
+		printf(" Signal    Stop Pass Print\n");
+		zsig_print_one(sig, p);
+		return 0;
+	}
+	for (i = 2; i < t->n; i++) {
+		if (parse_handle_opt(t->v[i],
+		    &set_stop, &stop,
+		    &set_pass, &pass,
+		    &set_print, &print) < 0) {
+			printf("bad handle option: %s\n", t->v[i]);
+			return -1;
+		}
+	}
+	if (zsig_set_policy(&d->sigs, sig,
+	    set_stop, stop, set_pass, pass, set_print, print) < 0) {
+		printf("bad signal\n");
+		return -1;
+	}
+	p = zsig_get_policy(&d->sigs, sig);
+	printf(" Signal    Stop Pass Print\n");
+	zsig_print_one(sig, p);
+	return 0;
+}
+
 /* --- top-level dispatch --------------------------------------- */
 
 void
@@ -1973,6 +2162,7 @@ zdbg_init(struct zdbg *d)
 	zregs_clear(&d->regs);
 	zmaps_init(&d->maps);
 	zsyms_init(&d->syms);
+	zsig_table_init(&d->sigs);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
@@ -2088,6 +2278,10 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_bt(d, &t);
 	if (strcmp(mn, "th") == 0)
 		return cmd_th(d, &t);
+	if (strcmp(mn, "sig") == 0)
+		return cmd_sig(d, &t);
+	if (strcmp(mn, "handle") == 0)
+		return cmd_handle(d, &t);
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;

@@ -155,3 +155,17 @@ ztarget_null_refresh_threads(struct ztarget *t)
 	(void)t;
 	return 0;
 }
+
+int
+ztarget_null_get_pending_signal(struct ztarget *t, uint64_t tid, int *sigp)
+{
+	(void)t; (void)tid; (void)sigp;
+	return -1;
+}
+
+int
+ztarget_null_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
+{
+	(void)t; (void)tid; (void)sig;
+	return -1;
+}
