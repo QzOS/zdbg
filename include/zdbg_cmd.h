@@ -17,6 +17,8 @@ struct zdbg {
 	zaddr_t dump_addr;
 	zaddr_t asm_addr;
 	int have_regs;
+	int target_argc;
+	char **target_argv;
 };
 
 void zdbg_init(struct zdbg *d);

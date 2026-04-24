@@ -38,5 +38,10 @@ target_include_directories(zdbg_core PUBLIC
 add_executable(zdbg src/main.c)
 target_link_libraries(zdbg PRIVATE zdbg_core)
 
+# Example target program used for manual debugging sessions.
+add_executable(testprog examples/testprog.c)
+set_target_properties(testprog PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+
 enable_testing()
 add_subdirectory(tests)

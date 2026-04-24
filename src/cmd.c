@@ -103,7 +103,11 @@ print_help(void)
 	printf("commands:\n"
 	    "  ?                    show this help\n"
 	    "  q                    quit\n"
-	    "  r [reg [value]]      show/set cached register value\n"
+	    "  l [path [args...]]   launch target\n"
+	    "  la pid               attach to pid\n"
+	    "  ld                   detach from target\n"
+	    "  k                    kill target\n"
+	    "  r [reg [value]]      show/set register value\n"
 	    "  d [addr [len]]       dump memory\n"
 	    "  x [addr [len]]       alias for d\n"
 	    "  e addr bytes...      write bytes\n"
@@ -123,7 +127,71 @@ print_help(void)
 static int
 have_target(struct zdbg *d)
 {
-	return d->target.state != ZTARGET_EMPTY;
+	return d->target.state != ZTARGET_EMPTY &&
+	    d->target.state != ZTARGET_EXITED &&
+	    d->target.state != ZTARGET_DETACHED;
+}
+
+static int
+target_stopped(struct zdbg *d)
+{
+	return d->target.state == ZTARGET_STOPPED;
+}
+
+static void
+zstop_print(const struct zstop *st)
+{
+	const char *reason = "stop";
+
+	if (st == NULL)
+		return;
+	switch (st->reason) {
+	case ZSTOP_INITIAL:
+		printf("stopped: initial trap rip=%016llx\n",
+		    (unsigned long long)st->addr);
+		return;
+	case ZSTOP_BREAKPOINT:
+		printf("stopped: breakpoint rip=%016llx\n",
+		    (unsigned long long)st->addr);
+		return;
+	case ZSTOP_SINGLESTEP:
+		printf("stopped: single-step rip=%016llx\n",
+		    (unsigned long long)st->addr);
+		return;
+	case ZSTOP_SIGNAL:
+		printf("stopped: signal %d rip=%016llx\n", st->code,
+		    (unsigned long long)st->addr);
+		return;
+	case ZSTOP_EXCEPTION:
+		printf("stopped: exception rip=%016llx\n",
+		    (unsigned long long)st->addr);
+		return;
+	case ZSTOP_EXIT:
+		printf("exited: code %d\n", st->code);
+		return;
+	case ZSTOP_ERROR:
+		printf("stopped: error\n");
+		return;
+	case ZSTOP_NONE:
+	default:
+		printf("stopped: %s\n", reason);
+		return;
+	}
+}
+
+/*
+ * Refresh the cached register snapshot from the backend when a
+ * target is stopped.  Silent on failure so the REPL keeps
+ * working with stale values if the backend cannot produce
+ * registers (e.g. non-x86-64 hosts).
+ */
+static void
+refresh_regs(struct zdbg *d)
+{
+	if (!target_stopped(d))
+		return;
+	if (ztarget_getregs(&d->target, &d->regs) == 0)
+		d->have_regs = 1;
 }
 
 /* --- r --------------------------------------------------------- */
@@ -131,11 +199,13 @@ static int
 cmd_r(struct zdbg *d, struct toks *t)
 {
 	if (t->n == 1) {
+		refresh_regs(d);
 		zregs_print(&d->regs);
 		return 0;
 	}
 	if (t->n == 2) {
 		uint64_t v = 0;
+		refresh_regs(d);
 		if (zregs_get_by_name(&d->regs, t->v[1], &v) < 0) {
 			printf("unknown register: %s\n", t->v[1]);
 			return -1;
@@ -145,6 +215,10 @@ cmd_r(struct zdbg *d, struct toks *t)
 	}
 	if (t->n >= 3) {
 		uint64_t v = 0;
+		if (d->target.state == ZTARGET_RUNNING) {
+			printf("target is running\n");
+			return -1;
+		}
 		if (zexpr_eval(t->v[2], &d->regs, &v) < 0) {
 			printf("bad value\n");
 			return -1;
@@ -154,6 +228,12 @@ cmd_r(struct zdbg *d, struct toks *t)
 			return -1;
 		}
 		d->have_regs = 1;
+		if (target_stopped(d)) {
+			if (ztarget_setregs(&d->target, &d->regs) < 0) {
+				printf("setregs failed\n");
+				return -1;
+			}
+		}
 		return 0;
 	}
 	return 0;
@@ -220,6 +300,7 @@ cmd_e(struct zdbg *d, struct toks *t)
 		printf("target operation not available in this backend yet\n");
 		return -1;
 	}
+	(void)ztarget_flush_icache(&d->target, addr, blen);
 	return 0;
 }
 
@@ -266,6 +347,7 @@ cmd_f(struct zdbg *d, struct toks *t)
 		printf("target operation not available in this backend yet\n");
 		return -1;
 	}
+	(void)ztarget_flush_icache(&d->target, addr, (size_t)len);
 	return 0;
 }
 
@@ -357,6 +439,9 @@ cmd_a(struct zdbg *d, struct toks *t)
 			if (ztarget_write(&d->target, addr, enc.code,
 			    enc.len) < 0) {
 				printf("write failed (backend unavailable)\n");
+			} else {
+				(void)ztarget_flush_icache(&d->target, addr,
+				    enc.len);
 			}
 		}
 		addr += enc.len;
@@ -403,6 +488,8 @@ cmd_pa(struct zdbg *d, struct toks *t)
 		if (ztarget_write(&d->target, addr, buf, out_len) < 0)
 			printf("target operation not available in this "
 			    "backend yet\n");
+		else
+			(void)ztarget_flush_icache(&d->target, addr, out_len);
 	}
 	return 0;
 }
@@ -436,6 +523,7 @@ cmd_ij(struct zdbg *d, struct toks *t)
 		printf("write failed\n");
 		return -1;
 	}
+	(void)ztarget_flush_icache(&d->target, addr, used);
 	return 0;
 }
 
@@ -528,25 +616,172 @@ cmd_be(struct zdbg *d, struct toks *t)
 }
 
 /* --- g / t ----------------------------------------------------- */
+
+/*
+ * Run-until-stop helper shared by g and t.  After the ptrace
+ * resume the command layer always waits and reports the stop,
+ * so the REPL returns with the target either stopped or exited.
+ */
+static int
+cmd_run_and_wait(struct zdbg *d, int step)
+{
+	struct zstop st;
+
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (step) {
+		if (ztarget_singlestep(&d->target) < 0) {
+			printf("singlestep failed\n");
+			return -1;
+		}
+	} else {
+		if (ztarget_continue(&d->target) < 0) {
+			printf("continue failed\n");
+			return -1;
+		}
+	}
+	memset(&st, 0, sizeof(st));
+	if (ztarget_wait(&d->target, &st) < 0) {
+		printf("wait failed\n");
+		return -1;
+	}
+	if (target_stopped(d))
+		refresh_regs(d);
+	zstop_print(&st);
+	return 0;
+}
+
 static int
 cmd_g(struct zdbg *d, struct toks *t)
 {
 	(void)t;
-	if (ztarget_continue(&d->target) < 0) {
-		printf("target operation not available in this backend yet\n");
-		return -1;
-	}
-	return 0;
+	return cmd_run_and_wait(d, 0);
 }
 
 static int
 cmd_t(struct zdbg *d, struct toks *t)
 {
 	(void)t;
-	if (ztarget_singlestep(&d->target) < 0) {
-		printf("target operation not available in this backend yet\n");
+	return cmd_run_and_wait(d, 1);
+}
+
+/* --- l / la / ld / k ------------------------------------------- */
+
+static int
+cmd_l(struct zdbg *d, struct toks *t)
+{
+	char *argv_local[MAX_TOKENS + 1];
+	char **argv;
+	int argc;
+	int i;
+
+	if (have_target(d)) {
+		printf("target already active; use ld or k first\n");
 		return -1;
 	}
+
+	if (t->n >= 2) {
+		argc = t->n - 1;
+		for (i = 0; i < argc; i++)
+			argv_local[i] = t->v[i + 1];
+		argv_local[argc] = NULL;
+		argv = argv_local;
+	} else {
+		argc = d->target_argc;
+		argv = d->target_argv;
+	}
+	if (argc <= 0 || argv == NULL || argv[0] == NULL) {
+		printf("usage: l [path [args...]] (or pass target on "
+		    "command line)\n");
+		return -1;
+	}
+
+	if (ztarget_launch(&d->target, argc, argv) < 0) {
+		printf("launch failed\n");
+		return -1;
+	}
+	printf("launched pid %llu\n", (unsigned long long)d->target.pid);
+	{
+		struct zstop st;
+		memset(&st, 0, sizeof(st));
+		st.reason = ZSTOP_INITIAL;
+		if (ztarget_getregs(&d->target, &d->regs) == 0) {
+			d->have_regs = 1;
+			st.addr = d->regs.rip;
+		}
+		zstop_print(&st);
+	}
+	return 0;
+}
+
+static int
+cmd_la(struct zdbg *d, struct toks *t)
+{
+	uint64_t pid;
+
+	if (t->n < 2) {
+		printf("usage: la pid\n");
+		return -1;
+	}
+	if (have_target(d)) {
+		printf("target already active; use ld or k first\n");
+		return -1;
+	}
+	if (zexpr_eval(t->v[1], NULL, &pid) < 0 || pid == 0) {
+		printf("bad pid\n");
+		return -1;
+	}
+	if (ztarget_attach(&d->target, pid) < 0) {
+		printf("attach failed\n");
+		return -1;
+	}
+	printf("attached pid %llu\n", (unsigned long long)d->target.pid);
+	{
+		struct zstop st;
+		memset(&st, 0, sizeof(st));
+		st.reason = ZSTOP_INITIAL;
+		if (ztarget_getregs(&d->target, &d->regs) == 0) {
+			d->have_regs = 1;
+			st.addr = d->regs.rip;
+		}
+		zstop_print(&st);
+	}
+	return 0;
+}
+
+static int
+cmd_ld(struct zdbg *d, struct toks *t)
+{
+	(void)t;
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (ztarget_detach(&d->target) < 0) {
+		printf("detach failed\n");
+		return -1;
+	}
+	ztarget_init(&d->target);
+	printf("detached\n");
+	return 0;
+}
+
+static int
+cmd_k(struct zdbg *d, struct toks *t)
+{
+	(void)t;
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (ztarget_kill(&d->target) < 0) {
+		printf("kill failed\n");
+		return -1;
+	}
+	ztarget_init(&d->target);
+	printf("killed\n");
 	return 0;
 }
 
@@ -640,6 +875,14 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_g(d, &t);
 	if (strcmp(mn, "t") == 0)
 		return cmd_t(d, &t);
+	if (strcmp(mn, "l") == 0)
+		return cmd_l(d, &t);
+	if (strcmp(mn, "la") == 0)
+		return cmd_la(d, &t);
+	if (strcmp(mn, "ld") == 0)
+		return cmd_ld(d, &t);
+	if (strcmp(mn, "k") == 0)
+		return cmd_k(d, &t);
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;
