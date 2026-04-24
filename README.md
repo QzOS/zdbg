@@ -13,10 +13,16 @@ Windows.
   continue from breakpoint for the current single traced Linux
   task.  Breakpoint rearm is not thread-safe yet; zdbg still
   traces only one task and does not coordinate multiple threads.
+* Tiny disassembler: recognizes a small useful x86-64 subset for
+  prologues, calls, jumps, stack adjustment, simple moves/tests/
+  comparisons.  Unknown instructions are still shown as `db`.
 * Linux memory maps: `lm` lists `/proc/<pid>/maps` and address
   expressions support `module+offset` for mapped modules.
   Module-relative expressions are *mapping-relative*, not ELF
   symbol/RVA aware yet.
+* Proceed/step-over (`p`) only supports direct `call rel32`
+  initially.  Indirect calls and complex instruction decoding
+  remain out of scope.
 * Thread handling: single traced task only; no clone/fork
   following, no `PTRACE_O_TRACECLONE`, no `/proc/<pid>/task`
   enumeration on attach.
@@ -78,6 +84,7 @@ Run the debugger:
     lm [addr]            list maps or show map containing address
     g                    continue (waits for next stop)
     t                    single step (waits for next stop)
+    p [count]            proceed / step over direct call
 
 Address expressions accept raw numbers (default hex), registers
 (`rip+10`), and — on Linux, after a target has been
