@@ -262,6 +262,170 @@ zsyms_resolve(const struct zsym_table *st, const struct zmap_table *maps,
 	return amb ? -2 : -1;
 }
 
+/*
+ * Rank a symbol type for tie-breaking when multiple symbols sit
+ * at the same address.  Higher is better.  Text symbols win over
+ * data; data wins over unknown.  Unknown defaults to zero.
+ */
+static int
+type_rank(char t)
+{
+	switch (t) {
+	case 'T':
+	case 't':
+		return 3;
+	case 'D':
+	case 'd':
+		return 2;
+	case '?':
+		return 0;
+	default:
+		return 1;
+	}
+}
+
+/*
+ * Return 1 if candidate a is a better "nearest" match for addr
+ * than candidate b, 0 otherwise.  Comparisons assume both a and
+ * b have a->addr <= addr and b->addr <= addr already.
+ */
+static int
+nearest_better(const struct zsym *a, const struct zsym *b, zaddr_t addr)
+{
+	int ar;
+	int br;
+
+	if (b == NULL)
+		return 1;
+	if (a->addr != b->addr)
+		return a->addr > b->addr;
+	/* same address: prefer the one whose sized range contains addr */
+	{
+		int a_in = (a->size != 0 && addr < a->addr + a->size);
+		int b_in = (b->size != 0 && addr < b->addr + b->size);
+		if (a_in != b_in)
+			return a_in;
+	}
+	ar = type_rank(a->type);
+	br = type_rank(b->type);
+	if (ar != br)
+		return ar > br;
+	if (a->bind != b->bind) {
+		if (a->bind == 'G' && b->bind != 'G')
+			return 1;
+		if (b->bind == 'G' && a->bind != 'G')
+			return 0;
+	}
+	/* deterministic fallback: prefer lexicographically smaller name */
+	return strcmp(a->name, b->name) < 0;
+}
+
+const struct zsym *
+zsyms_find_nearest(const struct zsym_table *st, zaddr_t addr,
+    uint64_t *offp)
+{
+	const struct zsym *best = NULL;
+	uint64_t off;
+	int i;
+
+	if (offp != NULL)
+		*offp = 0;
+	if (st == NULL)
+		return NULL;
+
+	for (i = 0; i < st->count; i++) {
+		const struct zsym *s = &st->syms[i];
+		if (s->addr > addr)
+			continue;
+		if (nearest_better(s, best, addr))
+			best = s;
+	}
+	if (best == NULL)
+		return NULL;
+
+	off = (uint64_t)(addr - best->addr);
+	/* accept inside sized range */
+	if (best->size != 0 && off < best->size) {
+		if (offp != NULL)
+			*offp = off;
+		return best;
+	}
+	/* accept small offsets outside range / for sizeless syms */
+	if (off <= ZDBG_NEAREST_MAX_OFF) {
+		if (offp != NULL)
+			*offp = off;
+		return best;
+	}
+	return NULL;
+}
+
+/*
+ * Decide whether a symbol name is unique across modules in st.
+ * Duplicate rows that differ only by type/bind but share name +
+ * module are treated as the same symbol and do not cause
+ * ambiguity.
+ */
+static int
+name_is_unique(const struct zsym_table *st, const struct zsym *target)
+{
+	int seen_other = 0;
+	int i;
+
+	if (st == NULL || target == NULL)
+		return 0;
+	for (i = 0; i < st->count; i++) {
+		const struct zsym *s = &st->syms[i];
+		if (s == target)
+			continue;
+		if (strcmp(s->name, target->name) != 0)
+			continue;
+		if (strcmp(s->module, target->module) == 0)
+			continue;
+		seen_other = 1;
+		break;
+	}
+	return !seen_other;
+}
+
+int
+zsyms_format_addr(const struct zsym_table *st, zaddr_t addr,
+    char *buf, size_t buflen)
+{
+	const struct zsym *s;
+	uint64_t off = 0;
+	const char *mod;
+	int n;
+
+	if (buf != NULL && buflen > 0)
+		buf[0] = 0;
+	if (st == NULL || buf == NULL || buflen == 0)
+		return 0;
+
+	s = zsyms_find_nearest(st, addr, &off);
+	if (s == NULL)
+		return 0;
+
+	mod = basename_of(s->module);
+	if (name_is_unique(st, s)) {
+		if (off == 0)
+			n = snprintf(buf, buflen, "%s", s->name);
+		else
+			n = snprintf(buf, buflen, "%s+0x%llx", s->name,
+			    (unsigned long long)off);
+	} else {
+		if (off == 0)
+			n = snprintf(buf, buflen, "%s:%s", mod, s->name);
+		else
+			n = snprintf(buf, buflen, "%s:%s+0x%llx", mod,
+			    s->name, (unsigned long long)off);
+	}
+	if (n < 0)
+		return 0;
+	if ((size_t)n >= buflen)
+		return (int)(buflen - 1);
+	return n;
+}
+
 #if !defined(__linux__)
 int
 zsyms_refresh(struct ztarget *t, const struct zmap_table *maps,

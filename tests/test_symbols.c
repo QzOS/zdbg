@@ -191,6 +191,81 @@ test_expr(struct zsym_table *st, struct zmap_table *mt)
 		FAILF("NULL syms numeric");
 }
 
+static void
+test_find_nearest(struct zsym_table *st)
+{
+	const struct zsym *s;
+	uint64_t off = 0xdead;
+
+	/* exact match: foo at 0x4000a0 */
+	s = zsyms_find_nearest(st, 0x4000a0, &off);
+	if (s == NULL || strcmp(s->name, "foo") != 0 || off != 0)
+		FAILF("nearest exact foo");
+
+	/* inside sized range: sized1 at 0x500000, size 0x20 */
+	s = zsyms_find_nearest(st, 0x500010, &off);
+	if (s == NULL || strcmp(s->name, "sized1") != 0 || off != 0x10)
+		FAILF("nearest inside sized (got %s off %llx)",
+		    s ? s->name : "<null>", (unsigned long long)off);
+
+	/* just past sized range should fall through to previous or none */
+	s = zsyms_find_nearest(st, 0x500020, &off);
+	if (s == NULL || strcmp(s->name, "sized1") != 0 || off != 0x20)
+		FAILF("nearest just past sized end (off %llx)",
+		    (unsigned long long)off);
+
+	/* no symbol below addr */
+	off = 0xdead;
+	s = zsyms_find_nearest(st, 0x100, &off);
+	if (s != NULL)
+		FAILF("nearest below first symbol");
+
+	/* absurd far-away address must be rejected */
+	s = zsyms_find_nearest(st, 0x7f0100 + 0x100000, &off);
+	if (s != NULL)
+		FAILF("nearest accepted absurd far-away offset");
+
+	/* prefer text over data at same address: tie at 0x600000 */
+	s = zsyms_find_nearest(st, 0x600000, &off);
+	if (s == NULL || s->type != 'T' || strcmp(s->name, "tietext") != 0 ||
+	    off != 0)
+		FAILF("nearest tie prefers text");
+}
+
+static void
+test_format_addr(struct zsym_table *st)
+{
+	char buf[128];
+	int n;
+
+	/* unique global name -> just name */
+	buf[0] = 'x';
+	n = zsyms_format_addr(st, 0x400100, buf, sizeof(buf));
+	if (n <= 0 || strcmp(buf, "main") != 0)
+		FAILF("format main got '%s'", buf);
+
+	/* offset */
+	n = zsyms_format_addr(st, 0x400108, buf, sizeof(buf));
+	if (n <= 0 || strcmp(buf, "main+0x8") != 0)
+		FAILF("format main+0x8 got '%s'", buf);
+
+	/* ambiguous basename -> module:name */
+	n = zsyms_format_addr(st, 0x7f0000, buf, sizeof(buf));
+	if (n <= 0 || strcmp(buf, "libc.so.6:dup") != 0)
+		FAILF("format ambiguous libc dup got '%s'", buf);
+
+	/* ambiguous with offset */
+	n = zsyms_format_addr(st, 0x7f0000 + 4, buf, sizeof(buf));
+	if (n <= 0 || strcmp(buf, "libc.so.6:dup+0x4") != 0)
+		FAILF("format ambiguous libc dup+4 got '%s'", buf);
+
+	/* unknown address: no symbol, empty string, zero return */
+	buf[0] = 'x';
+	n = zsyms_format_addr(st, 0x100, buf, sizeof(buf));
+	if (n != 0 || buf[0] != 0)
+		FAILF("format unknown addr n=%d '%s'", n, buf);
+}
+
 int
 main(void)
 {
@@ -217,10 +292,30 @@ main(void)
 	add_sym(&st, 0x7f0100, 'T', "malloc",
 	    "/lib/x86_64-linux-gnu/libc.so.6");
 
+	/* sized symbol for nearest-inside tests */
+	{
+		struct zsym *s = &st.syms[st.count++];
+		memset(s, 0, sizeof(*s));
+		s->addr = 0x500000;
+		s->size = 0x20;
+		s->type = 'T';
+		s->bind = 'G';
+		strncpy(s->name, "sized1", ZDBG_SYM_NAME_MAX - 1);
+		strncpy(s->module, "/home/me/build/examples/testprog",
+		    ZDBG_SYM_MODULE_MAX - 1);
+	}
+	/* tie at 0x600000: text + data, text should win */
+	add_sym(&st, 0x600000, 'D', "tiedata",
+	    "/home/me/build/examples/testprog");
+	add_sym(&st, 0x600000, 'T', "tietext",
+	    "/home/me/build/examples/testprog");
+
 	test_find_exact(&st);
 	test_find_qualified(&st);
 	test_resolve(&st);
 	test_expr(&st, &mt);
+	test_find_nearest(&st);
+	test_format_addr(&st);
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);

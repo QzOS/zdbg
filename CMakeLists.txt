@@ -50,7 +50,7 @@ set_target_properties(testprog PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
    CMAKE_C_COMPILER_ID MATCHES "Clang")
-    target_compile_options(testprog PRIVATE -O0 -g)
+    target_compile_options(testprog PRIVATE -O0 -g -fno-omit-frame-pointer)
 endif()
 
 enable_testing()

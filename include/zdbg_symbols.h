@@ -95,4 +95,42 @@ const struct zsym *zsyms_find_qualified(const struct zsym_table *st,
 int zsyms_resolve(const struct zsym_table *st,
     const struct zmap_table *maps, const char *expr, zaddr_t *out);
 
+/*
+ * Find the symbol at or before `addr` that best describes it.
+ *
+ * Selection rules (best-effort, deterministic):
+ *   1. Only consider symbols whose addr <= addr.
+ *   2. Prefer the symbol with the largest such addr.
+ *   3. On ties (same addr) prefer text symbols (T/t) over data
+ *      (D/d) over unknown (?), and global over local binding.
+ *   4. If the chosen symbol has a non-zero size and addr falls
+ *      inside [addr, addr+size), accept it.
+ *   5. Otherwise accept only when the offset is at most
+ *      ZDBG_NEAREST_MAX_OFF (0x10000 bytes) to avoid nonsense
+ *      like `main+0x7fffffff`.
+ *
+ * Returns NULL if no acceptable symbol exists.  *offp, if not
+ * NULL, receives (addr - symbol->addr) on success.
+ */
+#define ZDBG_NEAREST_MAX_OFF ((uint64_t)0x10000)
+
+const struct zsym *zsyms_find_nearest(const struct zsym_table *st,
+    zaddr_t addr, uint64_t *offp);
+
+/*
+ * Format `addr` as a symbolic string into `buf` of size `buflen`.
+ *
+ *   name                 offset == 0, name globally unique
+ *   name+0xN             offset != 0, name globally unique
+ *   module:name          offset == 0, ambiguous basename
+ *   module:name+0xN      offset != 0, ambiguous basename
+ *
+ * If no acceptable symbol is found, nothing is written and the
+ * return value is 0.  On success the number of bytes written
+ * (excluding the NUL terminator) is returned.  buf is always
+ * NUL-terminated when buflen > 0.
+ */
+int zsyms_format_addr(const struct zsym_table *st, zaddr_t addr,
+    char *buf, size_t buflen);
+
 #endif /* ZDBG_SYMBOLS_H */
