@@ -26,6 +26,7 @@
 
 #include "zdbg_expr.h"
 #include "zdbg_maps.h"
+#include "zdbg_symbols.h"
 
 static int
 is_regchar(int c)
@@ -464,4 +465,166 @@ zexpr_eval_maps(const char *s, const struct zregs *regs,
 	else
 		*out = lhs - rhs;
 	return 0;
+}
+
+/* --- symbol-aware evaluator ------------------------------------ */
+
+/*
+ * Strip optional trailing "+N"/"-N" from s into base and
+ * *off/op.  Returns 1 if an offset was found, 0 otherwise,
+ * -1 on overflow.  The offset side must be a pure number or
+ * register; if it parses as one the split is kept, otherwise
+ * the whole expression is returned as the base.
+ */
+static int
+split_off(const char *s, char *base, size_t cap, uint64_t *off, char *op)
+{
+	const char *p;
+	const char *last_sign = NULL;
+	size_t n;
+
+	for (p = s; *p; p++) {
+		if ((*p == '+' || *p == '-') && p != s)
+			last_sign = p;
+	}
+	if (last_sign == NULL) {
+		n = strlen(s);
+		if (n >= cap)
+			return -1;
+		memcpy(base, s, n);
+		base[n] = 0;
+		*off = 0;
+		*op = 0;
+		return 0;
+	}
+	n = (size_t)(last_sign - s);
+	if (n >= cap)
+		return -1;
+	memcpy(base, s, n);
+	base[n] = 0;
+	*op = *last_sign;
+	{
+		const char *q = last_sign + 1;
+		while (*q == ' ' || *q == '\t')
+			q++;
+		if (zexpr_eval(q, NULL, off) < 0) {
+			n = strlen(s);
+			if (n >= cap)
+				return -1;
+			memcpy(base, s, n);
+			base[n] = 0;
+			*off = 0;
+			*op = 0;
+			return 0;
+		}
+	}
+	return 1;
+}
+
+int
+zexpr_eval_symbols(const char *s, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zaddr_t *out)
+{
+	char base[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 8];
+	uint64_t off = 0;
+	char op = 0;
+	int has_off;
+	zaddr_t v = 0;
+	int amb = 0;
+	const struct zsym *sym = NULL;
+	const char *colon;
+
+	if (s == NULL || out == NULL)
+		return -1;
+
+	/*
+	 * Fast path: pure number or register (no module, no
+	 * symbol).  Doing this first makes numbers like "401000"
+	 * not accidentally shadow a symbol named "401000".
+	 */
+	if (zexpr_eval(s, regs, out) == 0)
+		return 0;
+
+	if (syms == NULL)
+		return zexpr_eval_maps(s, regs, maps, out);
+
+	has_off = split_off(s, base, sizeof(base), &off, &op);
+	if (has_off < 0)
+		return -1;
+
+	/* Trim whitespace around base. */
+	{
+		char *b = base;
+		size_t n;
+		while (*b == ' ' || *b == '\t')
+			b++;
+		if (b != base)
+			memmove(base, b, strlen(b) + 1);
+		n = strlen(base);
+		while (n > 0 && (base[n - 1] == ' ' || base[n - 1] == '\t'))
+			base[--n] = 0;
+	}
+	if (base[0] == 0)
+		return -1;
+
+	colon = strchr(base, ':');
+
+	/*
+	 * "name+N" / "name-N" with no colon: preserve legacy
+	 * mapping-relative semantics.  If the LHS happens to be
+	 * a mapping, the whole expression already resolved via
+	 * zexpr_eval_maps() before symbol lookup.  We special-case
+	 * "map:N" which contains a colon but is a map token - it
+	 * will be handled here and its strchr hit points inside
+	 * "map:"; fall through to the colon branch only for
+	 * module:symbol.
+	 */
+	if (has_off && colon == NULL) {
+		if (zexpr_eval_maps(s, regs, maps, out) == 0)
+			return 0;
+		/* fall through: try symbol+offset */
+	}
+
+	if (colon != NULL) {
+		/* "map:N" is a map token; try map-eval first. */
+		if (zexpr_eval_maps(s, regs, maps, out) == 0)
+			return 0;
+		{
+			int srv = zsyms_resolve(syms, maps, base, &v);
+			if (srv == 0) {
+				if (op == '+')
+					*out = (zaddr_t)(v + off);
+				else if (op == '-')
+					*out = (zaddr_t)(v - off);
+				else
+					*out = v;
+				return 0;
+			}
+			if (srv == -2)
+				fprintf(stderr,
+				    "ambiguous symbol: %s\n", base);
+		}
+		return -1;
+	}
+
+	/* Exact unqualified symbol lookup (precedence > module). */
+	sym = zsyms_find_exact(syms, base, &amb);
+	if (sym != NULL) {
+		v = sym->addr;
+		if (op == '+')
+			*out = (zaddr_t)(v + off);
+		else if (op == '-')
+			*out = (zaddr_t)(v - off);
+		else
+			*out = v;
+		return 0;
+	}
+	if (amb) {
+		fprintf(stderr, "ambiguous symbol: %s\n", base);
+		return -1;
+	}
+
+	/* Fall back to mapping base lookup (e.g. plain "libc"). */
+	return zexpr_eval_maps(s, regs, maps, out);
 }

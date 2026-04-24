@@ -17,6 +17,7 @@
 #include "zdbg_maps.h"
 #include "zdbg_mem.h"
 #include "zdbg_regs.h"
+#include "zdbg_symbols.h"
 #include "zdbg_target.h"
 #include "zdbg_tinyasm.h"
 #include "zdbg_tinydis.h"
@@ -122,6 +123,7 @@ print_help(void)
 	    "  bd n                 disable breakpoint\n"
 	    "  be n                 enable breakpoint\n"
 	    "  lm [addr]            list maps or show map at addr\n"
+	    "  sym [filter|-r]      list/search/refresh ELF symbols\n"
 	    "  g                    continue\n"
 	    "  t                    single step\n"
 	    "  p                    proceed / step over direct call\n");
@@ -232,20 +234,47 @@ clear_maps(struct zdbg *d)
 }
 
 /*
+ * Refresh loaded ELF symbols from the current map table.  Safe
+ * to call whether or not a target is active.
+ */
+static void
+refresh_syms(struct zdbg *d)
+{
+	if (!have_target(d) || !d->have_maps) {
+		zsyms_clear(&d->syms);
+		d->have_syms = 0;
+		return;
+	}
+	if (zsyms_refresh(&d->target, &d->maps, &d->syms) >= 0)
+		d->have_syms = 1;
+	else
+		d->have_syms = 0;
+}
+
+static void
+clear_syms(struct zdbg *d)
+{
+	zsyms_clear(&d->syms);
+	d->have_syms = 0;
+}
+
+/*
  * Evaluate an address expression using the current cached
- * registers and memory map (if available).  If maps have not
- * yet been loaded but a live target exists, load them lazily.
- * Returns 0 on success, -1 on failure.
+ * registers, memory map, and symbol table (if available).  If
+ * maps have not yet been loaded but a live target exists, load
+ * them lazily.  Returns 0 on success, -1 on failure.
  */
 static int
 eval_addr(struct zdbg *d, const char *s, zaddr_t *out)
 {
 	const struct zmap_table *maps;
+	const struct zsym_table *syms;
 
 	if (have_target(d) && !d->have_maps)
 		refresh_maps(d);
 	maps = d->have_maps ? &d->maps : NULL;
-	return zexpr_eval_maps(s, &d->regs, maps, out);
+	syms = d->have_syms ? &d->syms : NULL;
+	return zexpr_eval_symbols(s, &d->regs, maps, syms, out);
 }
 
 /* --- r --------------------------------------------------------- */
@@ -1042,6 +1071,7 @@ cmd_lm(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	refresh_maps(d);
+	refresh_syms(d);
 	if (!d->have_maps) {
 		printf("could not read process maps\n");
 		return -1;
@@ -1060,6 +1090,39 @@ cmd_lm(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	zmaps_print_one((int)(m - d->maps.maps), m);
+	return 0;
+}
+
+/* --- sym ------------------------------------------------------- */
+static int
+cmd_sym(struct zdbg *d, struct toks *t)
+{
+	const char *filter = NULL;
+
+	if (t->n >= 2 && strcmp(t->v[1], "-r") == 0) {
+		if (!have_target(d)) {
+			printf("no target\n");
+			return -1;
+		}
+		refresh_maps(d);
+		refresh_syms(d);
+		printf("loaded %d symbol(s)%s\n", d->syms.count,
+		    d->syms.truncated ? " (truncated)" : "");
+		return 0;
+	}
+	if (!d->have_syms) {
+		if (have_target(d)) {
+			refresh_maps(d);
+			refresh_syms(d);
+		}
+	}
+	if (!d->have_syms || d->syms.count == 0) {
+		printf("no symbols loaded\n");
+		return 0;
+	}
+	if (t->n >= 2)
+		filter = t->v[1];
+	zsyms_print(&d->syms, filter);
 	return 0;
 }
 
@@ -1121,8 +1184,10 @@ cmd_l(struct zdbg *d, struct toks *t)
 	}
 	printf("launched pid %llu\n", (unsigned long long)d->target.pid);
 	clear_maps(d);
+	clear_syms(d);
 	zmaps_set_main_hint(&d->maps, argv[0]);
 	refresh_maps(d);
+	refresh_syms(d);
 	report_initial_stop(d);
 	return 0;
 }
@@ -1150,7 +1215,9 @@ cmd_la(struct zdbg *d, struct toks *t)
 	}
 	printf("attached pid %llu\n", (unsigned long long)d->target.pid);
 	clear_maps(d);
+	clear_syms(d);
 	refresh_maps(d);
+	refresh_syms(d);
 	report_initial_stop(d);
 	return 0;
 }
@@ -1170,6 +1237,7 @@ cmd_ld(struct zdbg *d, struct toks *t)
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
 	clear_maps(d);
+	clear_syms(d);
 	printf("detached\n");
 	return 0;
 }
@@ -1189,6 +1257,7 @@ cmd_k(struct zdbg *d, struct toks *t)
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
 	clear_maps(d);
+	clear_syms(d);
 	printf("killed\n");
 	return 0;
 }
@@ -1205,10 +1274,12 @@ zdbg_init(struct zdbg *d)
 	zbp_table_init(&d->bps);
 	zregs_clear(&d->regs);
 	zmaps_init(&d->maps);
+	zsyms_init(&d->syms);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
 	d->have_maps = 0;
+	d->have_syms = 0;
 	d->stopped_bp = -1;
 }
 
@@ -1298,6 +1369,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_k(d, &t);
 	if (strcmp(mn, "lm") == 0)
 		return cmd_lm(d, &t);
+	if (strcmp(mn, "sym") == 0)
+		return cmd_sym(d, &t);
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;

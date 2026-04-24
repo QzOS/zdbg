@@ -19,6 +19,7 @@ set(ZDBG_CORE_SOURCES
     src/expr.c
     src/bp.c
     src/maps.c
+    src/symbols.c
     src/tinyasm.c
     src/tinydis.c
     src/target.c
@@ -29,6 +30,7 @@ set(ZDBG_CORE_SOURCES
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND ZDBG_CORE_SOURCES src/os_linux/target_linux.c)
     list(APPEND ZDBG_CORE_SOURCES src/os_linux/maps_linux.c)
+    list(APPEND ZDBG_CORE_SOURCES src/os_linux/symbols_elf.c)
 elseif(WIN32)
     list(APPEND ZDBG_CORE_SOURCES src/os_windows/target_windows.c)
 endif()
@@ -41,9 +43,15 @@ add_executable(zdbg src/main.c)
 target_link_libraries(zdbg PRIVATE zdbg_core)
 
 # Example target program used for manual debugging sessions.
+# Build at -O0 -g and keep symbols so the integration test (and
+# manual sessions) can look up main/foo via ELF .symtab.
 add_executable(testprog examples/testprog.c)
 set_target_properties(testprog PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
+   CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(testprog PRIVATE -O0 -g)
+endif()
 
 enable_testing()
 add_subdirectory(tests)
