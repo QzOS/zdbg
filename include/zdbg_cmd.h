@@ -8,6 +8,7 @@
 #include "zdbg.h"
 #include "zdbg_target.h"
 #include "zdbg_bp.h"
+#include "zdbg_hwbp.h"
 #include "zdbg_regs.h"
 #include "zdbg_maps.h"
 #include "zdbg_symbols.h"
@@ -15,6 +16,7 @@
 struct zdbg {
 	struct ztarget target;
 	struct zbp_table bps;
+	struct zhwbp_table hwbps;
 	struct zregs regs;
 	struct zmap_table maps;
 	struct zsym_table syms;
@@ -26,6 +28,7 @@ struct zdbg {
 	int target_argc;
 	char **target_argv;
 	int stopped_bp;		/* id of breakpoint currently stopped on, -1 otherwise */
+	int stopped_hwbp;	/* id of hw breakpoint currently stopped on, -1 otherwise */
 };
 
 void zdbg_init(struct zdbg *d);
