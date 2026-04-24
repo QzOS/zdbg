@@ -18,6 +18,7 @@ set(ZDBG_CORE_SOURCES
     src/mem.c
     src/expr.c
     src/bp.c
+    src/maps.c
     src/tinyasm.c
     src/tinydis.c
     src/target.c
@@ -27,6 +28,7 @@ set(ZDBG_CORE_SOURCES
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND ZDBG_CORE_SOURCES src/os_linux/target_linux.c)
+    list(APPEND ZDBG_CORE_SOURCES src/os_linux/maps_linux.c)
 elseif(WIN32)
     list(APPEND ZDBG_CORE_SOURCES src/os_windows/target_windows.c)
 endif()

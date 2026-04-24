@@ -13,10 +13,14 @@ Windows.
   continue from breakpoint for the current single traced Linux
   task.  Breakpoint rearm is not thread-safe yet; zdbg still
   traces only one task and does not coordinate multiple threads.
+* Linux memory maps: `lm` lists `/proc/<pid>/maps` and address
+  expressions support `module+offset` for mapped modules.
+  Module-relative expressions are *mapping-relative*, not ELF
+  symbol/RVA aware yet.
 * Thread handling: single traced task only; no clone/fork
   following, no `PTRACE_O_TRACECLONE`, no `/proc/<pid>/task`
   enumeration on attach.
-* No DWARF/PDB, no symbols, no module enumeration, no hardware
+* No DWARF/PDB, no symbols, no hardware
   breakpoints or watchpoints, no remote debugging.
 
 On non-Linux hosts every target-dependent command still prints
@@ -34,7 +38,7 @@ deliberately avoids:
 * a full x86 assembler or disassembler
 * Capstone / Keystone / libbfd / LLVM
 * scripting, plugins, remote debugging, GUI
-* file patching, module enumeration, hardware breakpoints
+* file patching, hardware breakpoints
 
 ## Build
 
@@ -71,8 +75,31 @@ Run the debugger:
     bc n|*               clear breakpoint
     bd n                 disable breakpoint
     be n                 enable breakpoint
+    lm [addr]            list maps or show map containing address
     g                    continue (waits for next stop)
     t                    single step (waits for next stop)
+
+Address expressions accept raw numbers (default hex), registers
+(`rip+10`), and — on Linux, after a target has been
+launched/attached — mapping-relative module names:
+
+    main+1000                        main executable mapping + 0x1000
+    libc+18a70                       selected libc mapping + 0x18a70
+    /lib/.../libc.so.6+20            full-path mapping + 0x20
+    [stack]-20                       bracketed special map - 0x20
+    map:1+30                         Nth mapping + 0x30
+
+Module resolution is mapping-relative (not ELF image-base /
+symbol aware).  If a short basename matches more than one mapped
+module, the expression fails with an ambiguity message.
+
+Typical session:
+
+    l
+    lm
+    u main+1000 10
+    b main+1180
+    pa main+1190 6 jmp main+1200
 
 ## Architecture overview
 

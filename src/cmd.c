@@ -14,6 +14,7 @@
 #include "zdbg.h"
 #include "zdbg_cmd.h"
 #include "zdbg_expr.h"
+#include "zdbg_maps.h"
 #include "zdbg_mem.h"
 #include "zdbg_regs.h"
 #include "zdbg_target.h"
@@ -120,6 +121,7 @@ print_help(void)
 	    "  bc n|*               clear breakpoint\n"
 	    "  bd n                 disable breakpoint\n"
 	    "  be n                 enable breakpoint\n"
+	    "  lm [addr]            list maps or show map at addr\n"
 	    "  g                    continue\n"
 	    "  t                    single step\n");
 }
@@ -198,6 +200,53 @@ refresh_regs(struct zdbg *d)
 		d->have_regs = 1;
 }
 
+/*
+ * Lazily (re)read /proc/<pid>/maps for the current target.
+ * Safe to call whether or not a target is active.
+ */
+static void
+refresh_maps(struct zdbg *d)
+{
+	if (!have_target(d)) {
+		d->have_maps = 0;
+		d->maps.count = 0;
+		return;
+	}
+	if (zmaps_refresh(&d->target, &d->maps) == 0)
+		d->have_maps = 1;
+	else
+		d->have_maps = 0;
+}
+
+/*
+ * Forget the cached memory map.  Used on detach/kill/new launch.
+ */
+static void
+clear_maps(struct zdbg *d)
+{
+	d->have_maps = 0;
+	d->maps.count = 0;
+	d->maps.truncated = 0;
+	d->maps.main_hint[0] = 0;
+}
+
+/*
+ * Evaluate an address expression using the current cached
+ * registers and memory map (if available).  If maps have not
+ * yet been loaded but a live target exists, load them lazily.
+ * Returns 0 on success, -1 on failure.
+ */
+static int
+eval_addr(struct zdbg *d, const char *s, zaddr_t *out)
+{
+	const struct zmap_table *maps;
+
+	if (have_target(d) && !d->have_maps)
+		refresh_maps(d);
+	maps = d->have_maps ? &d->maps : NULL;
+	return zexpr_eval_maps(s, &d->regs, maps, out);
+}
+
 /* --- r --------------------------------------------------------- */
 static int
 cmd_r(struct zdbg *d, struct toks *t)
@@ -252,7 +301,7 @@ cmd_d(struct zdbg *d, struct toks *t)
 	uint8_t buf[256];
 
 	if (t->n >= 2) {
-		if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+		if (eval_addr(d, t->v[1], &addr) < 0) {
 			printf("bad address\n");
 			return -1;
 		}
@@ -290,7 +339,7 @@ cmd_e(struct zdbg *d, struct toks *t)
 		printf("usage: e addr bytes...\n");
 		return -1;
 	}
-	if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+	if (eval_addr(d, t->v[1], &addr) < 0) {
 		printf("bad address\n");
 		return -1;
 	}
@@ -323,7 +372,7 @@ cmd_f(struct zdbg *d, struct toks *t)
 		printf("usage: f addr len bytes...\n");
 		return -1;
 	}
-	if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+	if (eval_addr(d, t->v[1], &addr) < 0) {
 		printf("bad address\n");
 		return -1;
 	}
@@ -365,7 +414,7 @@ cmd_u(struct zdbg *d, struct toks *t)
 	int i;
 
 	if (t->n >= 2) {
-		if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+		if (eval_addr(d, t->v[1], &addr) < 0) {
 			printf("bad address\n");
 			return -1;
 		}
@@ -409,7 +458,7 @@ cmd_a(struct zdbg *d, struct toks *t)
 	char line[256];
 
 	if (t->n >= 2) {
-		if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+		if (eval_addr(d, t->v[1], &addr) < 0) {
 			printf("bad address\n");
 			return -1;
 		}
@@ -467,7 +516,7 @@ cmd_pa(struct zdbg *d, struct toks *t)
 		printf("usage: pa addr len insn...\n");
 		return -1;
 	}
-	if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+	if (eval_addr(d, t->v[1], &addr) < 0) {
 		printf("bad address\n");
 		return -1;
 	}
@@ -510,7 +559,7 @@ cmd_ij(struct zdbg *d, struct toks *t)
 		printf("usage: ij addr\n");
 		return -1;
 	}
-	if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+	if (eval_addr(d, t->v[1], &addr) < 0) {
 		printf("bad address\n");
 		return -1;
 	}
@@ -542,7 +591,7 @@ cmd_b(struct zdbg *d, struct toks *t)
 		zbp_list(&d->bps);
 		return 0;
 	}
-	if (zexpr_eval(t->v[1], &d->regs, &addr) < 0) {
+	if (eval_addr(d, t->v[1], &addr) < 0) {
 		printf("bad address\n");
 		return -1;
 	}
@@ -819,6 +868,39 @@ cmd_t(struct zdbg *d, struct toks *t)
 	return cmd_run_and_wait(d, 1);
 }
 
+/* --- lm -------------------------------------------------------- */
+static int
+cmd_lm(struct zdbg *d, struct toks *t)
+{
+	zaddr_t addr;
+	const struct zmap *m;
+
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	refresh_maps(d);
+	if (!d->have_maps) {
+		printf("could not read process maps\n");
+		return -1;
+	}
+	if (t->n < 2) {
+		zmaps_print(&d->maps);
+		return 0;
+	}
+	if (eval_addr(d, t->v[1], &addr) < 0) {
+		printf("bad address\n");
+		return -1;
+	}
+	m = zmaps_find_by_addr(&d->maps, addr);
+	if (m == NULL) {
+		printf("%016llx: no mapping\n", (unsigned long long)addr);
+		return -1;
+	}
+	zmaps_print_one((int)(m - d->maps.maps), m);
+	return 0;
+}
+
 /* --- l / la / ld / k ------------------------------------------- */
 
 /*
@@ -876,6 +958,9 @@ cmd_l(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	printf("launched pid %llu\n", (unsigned long long)d->target.pid);
+	clear_maps(d);
+	zmaps_set_main_hint(&d->maps, argv[0]);
+	refresh_maps(d);
 	report_initial_stop(d);
 	return 0;
 }
@@ -902,6 +987,8 @@ cmd_la(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	printf("attached pid %llu\n", (unsigned long long)d->target.pid);
+	clear_maps(d);
+	refresh_maps(d);
 	report_initial_stop(d);
 	return 0;
 }
@@ -920,6 +1007,7 @@ cmd_ld(struct zdbg *d, struct toks *t)
 	}
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
+	clear_maps(d);
 	printf("detached\n");
 	return 0;
 }
@@ -938,6 +1026,7 @@ cmd_k(struct zdbg *d, struct toks *t)
 	}
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
+	clear_maps(d);
 	printf("killed\n");
 	return 0;
 }
@@ -953,9 +1042,11 @@ zdbg_init(struct zdbg *d)
 	ztarget_init(&d->target);
 	zbp_table_init(&d->bps);
 	zregs_clear(&d->regs);
+	zmaps_init(&d->maps);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
+	d->have_maps = 0;
 	d->stopped_bp = -1;
 }
 
@@ -1041,6 +1132,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_ld(d, &t);
 	if (strcmp(mn, "k") == 0)
 		return cmd_k(d, &t);
+	if (strcmp(mn, "lm") == 0)
+		return cmd_lm(d, &t);
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;

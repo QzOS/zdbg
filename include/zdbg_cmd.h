@@ -9,14 +9,17 @@
 #include "zdbg_target.h"
 #include "zdbg_bp.h"
 #include "zdbg_regs.h"
+#include "zdbg_maps.h"
 
 struct zdbg {
 	struct ztarget target;
 	struct zbp_table bps;
 	struct zregs regs;
+	struct zmap_table maps;
 	zaddr_t dump_addr;
 	zaddr_t asm_addr;
 	int have_regs;
+	int have_maps;
 	int target_argc;
 	char **target_argv;
 	int stopped_bp;		/* id of breakpoint currently stopped on, -1 otherwise */
