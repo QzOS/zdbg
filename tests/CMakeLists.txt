@@ -48,4 +48,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME test_linux_symbols COMMAND test_linux_symbols)
     set_tests_properties(test_linux_symbols PROPERTIES
         ENVIRONMENT "ZDBG_TESTPROG=$<TARGET_FILE:testprog>")
+
+    add_executable(test_linux_threads test_linux_threads.c)
+    target_link_libraries(test_linux_threads PRIVATE zdbg_core)
+    add_test(NAME test_linux_threads COMMAND test_linux_threads)
+    set_tests_properties(test_linux_threads PROPERTIES
+        ENVIRONMENT "ZDBG_TESTTHREADS=$<TARGET_FILE:testthreads>")
 endif()

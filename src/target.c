@@ -124,3 +124,39 @@ ztarget_set_debugreg(struct ztarget *t, int regno, uint64_t v)
 {
 	return ZBACKEND(set_debugreg)(t, regno, v);
 }
+
+int
+ztarget_set_debugreg_all(struct ztarget *t, int regno, uint64_t v)
+{
+	return ZBACKEND(set_debugreg_all)(t, regno, v);
+}
+
+int
+ztarget_thread_count(struct ztarget *t)
+{
+	return ZBACKEND(thread_count)(t);
+}
+
+int
+ztarget_thread_get(struct ztarget *t, int idx, struct zthread *out)
+{
+	return ZBACKEND(thread_get)(t, idx, out);
+}
+
+int
+ztarget_select_thread(struct ztarget *t, uint64_t tid)
+{
+	return ZBACKEND(select_thread)(t, tid);
+}
+
+uint64_t
+ztarget_current_thread(struct ztarget *t)
+{
+	return ZBACKEND(current_thread)(t);
+}
+
+int
+ztarget_refresh_threads(struct ztarget *t)
+{
+	return ZBACKEND(refresh_threads)(t);
+}
