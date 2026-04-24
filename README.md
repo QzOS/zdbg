@@ -83,7 +83,15 @@ Windows.
   thread; `sig` can clear or set the signal delivered on next
   resume; `handle` controls stop/pass/print policy.  Signal
   policy is process-wide inside zdbg, not per-thread.  Windows
-  exception policy is not implemented yet.
+  exception handling: zdbg names common Windows exception
+  codes, exposes the pending exception with `ex`, and uses
+  `handle` stop/pass/print policy for Windows exceptions.
+  `pass` means `DBG_EXCEPTION_NOT_HANDLED`; `nopass` means
+  `DBG_CONTINUE`.  Breakpoint, hardware-breakpoint, and
+  single-step events are not routed through the exception
+  policy and remain debugger-internal.  No SEH chain decoding,
+  no C++ exception object decoding, no CLR exception decoding,
+  and no Windows source/PDB integration.
 * Patch journal: user memory writes (`e`, `f`, `a`, `pa`, `ij`)
   are recorded with old/new bytes and can be listed (`pl`),
   reverted (`pu`), reapplied (`pr`), saved as raw bytes or a
@@ -96,8 +104,11 @@ Windows.
   gone.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 * Windows support is younger than Linux support.  No PDB, no
-  CodeView, no private/COFF symbols, no Windows exception
-  policy, no WOW64.  Windows hardware watchpoints rely on
+  CodeView, no private/COFF symbols, no WOW64.  Windows
+  exception control is now available: named exception codes,
+  `ex` for pending-event inspection/pass/nopass/clear, and
+  `handle` stop/pass/print policy for Windows exceptions.
+  Windows hardware watchpoints rely on
   known debug-event threads and are not yet a fully non-stop
   multi-thread solution.  Windows `lm` lists module images,
   not full `VirtualQueryEx` memory regions.  Windows symbols
@@ -106,8 +117,10 @@ Windows.
   is not available on Windows: the synthetic image maps are
   flagged non-raw-file-offset-valid and `pw` refuses them
   until real PE RVA-to-file-offset support is implemented.
-  POSIX `sig`/`handle` semantics remain Linux-only; `bt` on
-  Windows relies on frame pointers as on Linux.
+  POSIX `sig`/`handle` for signals remains Linux-only; on
+  Windows `handle` operates on exception codes instead and
+  `ex` manages the pending `ContinueDebugEvent` status.  `bt`
+  on Windows relies on frame pointers as on Linux.
 
 On non-Linux hosts every target-dependent command still prints
 
@@ -195,7 +208,13 @@ Run the debugger:
     sig -l               list known signals
     sig 0                clear pending signal
     sig SIGSEGV          set pending signal for next resume
-    handle [sig [opts]]  show/set signal stop/pass/print policy
+    ex                   show pending Windows exception
+    ex -l                list known Windows exception names
+    ex 0                 suppress pending exception (DBG_CONTINUE)
+    ex pass|nopass       set pending exception continuation
+    ex CODE pass|nopass  set pending exception continuation (guarded)
+    handle [name [opts]] show/set signal stop/pass/print policy on
+                         Linux, or Windows exception policy on Windows
 
 Address expressions accept raw numbers (default hex), registers
 (`rip+10`), and — on Linux, after a target has been

@@ -46,6 +46,7 @@ ztarget_null_wait(struct ztarget *t, struct zstop *st)
 		st->addr = 0;
 		st->code = 0;
 		st->tid = 0;
+		st->first_chance = 0;
 	}
 	return -1;
 }
@@ -167,5 +168,30 @@ int
 ztarget_null_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
 {
 	(void)t; (void)tid; (void)sig;
+	return -1;
+}
+
+int
+ztarget_null_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp)
+{
+	(void)t; (void)tid; (void)codep;
+	(void)first_chancep; (void)passp;
+	return -1;
+}
+
+int
+ztarget_null_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass)
+{
+	(void)t; (void)tid; (void)code;
+	(void)first_chance; (void)pass;
+	return -1;
+}
+
+int
+ztarget_null_clear_pending_exception(struct ztarget *t, uint64_t tid)
+{
+	(void)t; (void)tid;
 	return -1;
 }

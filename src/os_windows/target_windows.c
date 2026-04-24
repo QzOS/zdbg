@@ -779,6 +779,7 @@ zw_map_exception(struct zw_target *wt,
 
 	st->addr = addr;
 	st->code = (int)code;
+	st->first_chance = ex->dwFirstChance ? 1 : 0;
 
 	switch (code) {
 	case EXCEPTION_BREAKPOINT:
@@ -1647,6 +1648,101 @@ ztarget_windows_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
 {
 	(void)t; (void)tid; (void)sig;
 	return -1;
+}
+
+/* ---------------- pending exception ---------------- */
+
+/*
+ * Check whether wt currently has a real pending EXCEPTION_DEBUG_EVENT.
+ * Breakpoint / single-step exceptions are considered debugger-
+ * internal and not exposed through the pending-exception API:
+ * they are mapped to ZSTOP_BREAKPOINT/ZSTOP_SINGLESTEP above and
+ * would not be something the user can meaningfully pass/nopass.
+ * Returns 1 if a real exception is pending, 0 otherwise.
+ */
+static int
+zw_pending_real_exception(const struct zw_target *wt, DWORD *codep,
+    int *first_chancep)
+{
+	DWORD code;
+
+	if (wt == NULL || !wt->have_event)
+		return 0;
+	if (wt->last_event.dwDebugEventCode != EXCEPTION_DEBUG_EVENT)
+		return 0;
+	code = wt->last_event.u.Exception.ExceptionRecord.ExceptionCode;
+	if (code == EXCEPTION_BREAKPOINT || code == EXCEPTION_SINGLE_STEP)
+		return 0;
+	if (codep != NULL)
+		*codep = code;
+	if (first_chancep != NULL)
+		*first_chancep =
+		    wt->last_event.u.Exception.dwFirstChance ? 1 : 0;
+	return 1;
+}
+
+int
+ztarget_windows_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp)
+{
+	struct zw_target *wt = zw_get(t);
+	DWORD code = 0;
+	int fc = 0;
+
+	(void)tid;	/* Windows debug API has one pending event */
+	if (wt == NULL)
+		return -1;
+	if (!zw_pending_real_exception(wt, &code, &fc))
+		return -1;
+	if (codep != NULL)
+		*codep = (uint32_t)code;
+	if (first_chancep != NULL)
+		*first_chancep = fc;
+	if (passp != NULL)
+		*passp = (wt->continue_status == DBG_EXCEPTION_NOT_HANDLED)
+		    ? 1 : 0;
+	return 0;
+}
+
+int
+ztarget_windows_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass)
+{
+	struct zw_target *wt = zw_get(t);
+	DWORD cur_code = 0;
+	int cur_fc = 0;
+
+	(void)tid;
+	if (wt == NULL)
+		return -1;
+	if (!zw_pending_real_exception(wt, &cur_code, &cur_fc))
+		return -1;
+	/*
+	 * The issue explicitly disallows inventing a queue of
+	 * exceptions.  If the caller supplies a non-zero code it
+	 * must match the pending event.  code==0 means "ignore
+	 * code, just apply pass/nopass".
+	 */
+	if (code != 0 && code != (uint32_t)cur_code)
+		return -1;
+	if (first_chance >= 0 && first_chance != cur_fc)
+		return -1;
+	wt->continue_status = pass ? DBG_EXCEPTION_NOT_HANDLED : DBG_CONTINUE;
+	return 0;
+}
+
+int
+ztarget_windows_clear_pending_exception(struct ztarget *t, uint64_t tid)
+{
+	struct zw_target *wt = zw_get(t);
+
+	(void)tid;
+	if (wt == NULL)
+		return -1;
+	if (!zw_pending_real_exception(wt, NULL, NULL))
+		return -1;
+	wt->continue_status = DBG_CONTINUE;
+	return 0;
 }
 
 #endif /* _WIN32 */

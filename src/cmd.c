@@ -19,6 +19,7 @@
 #include "zdbg_mem.h"
 #include "zdbg_regs.h"
 #include "zdbg_signal.h"
+#include "zdbg_exception.h"
 #include "zdbg_symbols.h"
 #include "zdbg_target.h"
 #include "zdbg_tinyasm.h"
@@ -146,7 +147,11 @@ print_help(void)
 	    "  p                    proceed / step over direct call\n"
 	    "  th [tid|index]       list/select traced thread\n"
 	    "  sig [-l|0|name|num]  show/list/clear/set pending signal\n"
-	    "  handle [sig [opts]]  show/set signal stop/pass/print policy\n");
+	    "  ex [-l|0|pass|nopass|code]\n"
+	    "                       show/list/clear/set pending Windows "
+	    "exception\n"
+	    "  handle [sig [opts]]  show/set signal/exception stop/pass/"
+	    "print policy\n");
 }
 
 static int
@@ -269,15 +274,26 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 		    tp, zsig_name(st->code), st->code,
 		    (unsigned long long)st->addr, ann);
 		return;
-	case ZSTOP_EXCEPTION:
-		if (st->code != 0)
-			printf("stopped: %sexception 0x%08x rip=%016llx%s\n",
-			    tp, (unsigned int)st->code,
+	case ZSTOP_EXCEPTION: {
+		const char *chance;
+		const char *name;
+		chance = st->first_chance ? " first-chance" : " second-chance";
+		name = zexc_name((uint32_t)st->code);
+		if (st->code != 0 && strcmp(name, "EXCEPTION?") != 0)
+			printf("stopped: %sexception %s(0x%08x)%s"
+			    " rip=%016llx%s\n",
+			    tp, name, (unsigned int)st->code, chance,
+			    (unsigned long long)st->addr, ann);
+		else if (st->code != 0)
+			printf("stopped: %sexception 0x%08x%s"
+			    " rip=%016llx%s\n",
+			    tp, (unsigned int)st->code, chance,
 			    (unsigned long long)st->addr, ann);
 		else
 			printf("stopped: %sexception rip=%016llx%s\n",
 			    tp, (unsigned long long)st->addr, ann);
 		return;
+	}
 	case ZSTOP_EXIT:
 		if (tp[0] != 0)
 			printf("exited: %scode %d\n", tp, st->code);
@@ -1358,6 +1374,57 @@ cmd_run_and_wait(struct zdbg *d, int step)
 		}
 		zdbg_after_wait(d, &st, &bp_id);
 
+		if (st.reason == ZSTOP_EXCEPTION) {
+			const struct zexc_policy *xp;
+			uint32_t xcode = (uint32_t)st.code;
+			int do_stop = 1;
+			int do_print = 1;
+			int do_pass = 1;
+
+			xp = zexc_get_policy(&d->excs, xcode);
+			if (xp != NULL) {
+				do_stop = xp->stop ? 1 : 0;
+				do_print = xp->print ? 1 : 0;
+				do_pass = xp->pass ? 1 : 0;
+			}
+			/*
+			 * Apply pass/nopass to the pending Windows
+			 * exception via the target API.  Linux
+			 * returns -1 cleanly; that is not fatal.
+			 */
+			if (do_pass)
+				(void)ztarget_set_pending_exception(
+				    &d->target, st.tid, 0, -1, 1);
+			else
+				(void)ztarget_clear_pending_exception(
+				    &d->target, st.tid);
+			if (!do_stop) {
+				if (do_print) {
+					char tp[64];
+					stop_thread_prefix(d, &st, tp,
+					    sizeof(tp));
+					printf("exception: %s%s(0x%08x) %s"
+					    " %s\n", tp,
+					    zexc_name(xcode),
+					    (unsigned int)xcode,
+					    st.first_chance ?
+					    "first-chance" : "second-chance",
+					    do_pass ? "passed" :
+					    "suppressed");
+				}
+				/* auto-continue and keep waiting */
+				(void)zhwbp_program(&d->target, &d->hwbps);
+				if (ztarget_continue(&d->target) < 0) {
+					printf("continue failed\n");
+					return -1;
+				}
+				continue;
+			}
+			if (do_print)
+				zstop_print(d, &st, bp_id);
+			return 0;
+		}
+
 		if (st.reason == ZSTOP_SIGNAL) {
 			const struct zsig_policy *p;
 			int sig = st.code;
@@ -2203,20 +2270,49 @@ static int
 cmd_handle(struct zdbg *d, struct toks *t)
 {
 	int sig = 0;
+	uint32_t xcode = 0;
+	int is_exc = 0;
 	const struct zsig_policy *p;
+	const struct zexc_policy *xp;
 	int set_stop = 0, set_pass = 0, set_print = 0;
 	int stop = 0, pass = 0, print = 0;
 	int i;
 
 	if (t->n == 1) {
+#if defined(_WIN32)
+		zexc_print_table(&d->excs);
+#else
 		zsig_print_table(&d->sigs);
+#endif
 		return 0;
 	}
-	if (zsig_parse(t->v[1], &sig) < 0 || sig == 0) {
-		printf("unknown signal: %s\n", t->v[1]);
+	/*
+	 * Try signal first, then exception.  Both tables are
+	 * available on every platform so that configuration
+	 * scripts do not care about host OS, but output routing
+	 * honors the native meaning: POSIX names update signals,
+	 * Windows exception names update the exception table.
+	 */
+	if (zsig_parse(t->v[1], &sig) == 0 && sig != 0) {
+		is_exc = 0;
+	} else if (zexc_parse(t->v[1], &xcode) == 0) {
+		is_exc = 1;
+	} else {
+		printf("unknown signal/exception: %s\n", t->v[1]);
 		return -1;
 	}
 	if (t->n == 2) {
+		if (is_exc) {
+			xp = zexc_get_policy(&d->excs, xcode);
+			if (xp == NULL) {
+				printf("no policy\n");
+				return -1;
+			}
+			printf(" Exception                          "
+			    "Stop Pass Print\n");
+			zexc_print_one(xcode, xp);
+			return 0;
+		}
 		p = zsig_get_policy(&d->sigs, sig);
 		if (p == NULL) {
 			printf("unknown signal: %s\n", t->v[1]);
@@ -2235,6 +2331,18 @@ cmd_handle(struct zdbg *d, struct toks *t)
 			return -1;
 		}
 	}
+	if (is_exc) {
+		if (zexc_set_policy(&d->excs, xcode,
+		    set_stop, stop, set_pass, pass, set_print, print) < 0) {
+			printf("exception policy table full\n");
+			return -1;
+		}
+		xp = zexc_get_policy(&d->excs, xcode);
+		printf(" Exception                          "
+		    "Stop Pass Print\n");
+		zexc_print_one(xcode, xp);
+		return 0;
+	}
 	if (zsig_set_policy(&d->sigs, sig,
 	    set_stop, stop, set_pass, pass, set_print, print) < 0) {
 		printf("bad signal\n");
@@ -2244,6 +2352,144 @@ cmd_handle(struct zdbg *d, struct toks *t)
 	printf(" Signal    Stop Pass Print\n");
 	zsig_print_one(sig, p);
 	return 0;
+}
+
+/*
+ * cmd_ex: Windows exception pending-event control.
+ *
+ *   ex                        show pending exception on current thread
+ *   ex -l                     list known Windows exception names/codes
+ *   ex 0                      suppress pending exception (DBG_CONTINUE)
+ *   ex pass | nopass          change pending exception continuation
+ *   ex CODE pass | nopass     same, with an optional code match guard
+ *
+ * On non-Windows backends the underlying ztarget calls return
+ * -1 and `ex` reports "Windows exception control unavailable on
+ * this backend".
+ */
+static int
+cmd_ex(struct zdbg *d, struct toks *t)
+{
+	uint64_t tid;
+	uint32_t code = 0;
+	int fc = 0;
+	int cur_pass = 0;
+
+	if (t->n >= 2 && strcmp(t->v[1], "-l") == 0) {
+		zexc_print_names();
+		return 0;
+	}
+
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (!target_stopped(d)) {
+		printf("target not stopped\n");
+		return -1;
+	}
+
+	tid = ztarget_current_thread(&d->target);
+
+	if (t->n == 1) {
+		if (ztarget_get_pending_exception(&d->target, 0,
+		    &code, &fc, &cur_pass) < 0) {
+			/*
+			 * Could be Linux (API unsupported) or Windows
+			 * with no real exception pending.  The former
+			 * should say "unavailable"; we can only
+			 * detect the difference by trying a clear
+			 * with no active exception.  Report "none"
+			 * for the common case and let non-Windows
+			 * users see the platform-neutral message.
+			 */
+#if defined(_WIN32)
+			printf("thread %llu pending exception: none\n",
+			    (unsigned long long)tid);
+#else
+			printf("Windows exception control unavailable "
+			    "on this backend\n");
+#endif
+			return 0;
+		}
+		printf("thread %llu pending exception: %s(0x%08x)"
+		    " %s pass=%s\n",
+		    (unsigned long long)tid, zexc_name(code),
+		    (unsigned int)code,
+		    fc ? "first-chance" : "second-chance",
+		    cur_pass ? "yes" : "no");
+		return 0;
+	}
+
+	/* ex 0 -> clear/suppress */
+	if (strcmp(t->v[1], "0") == 0) {
+		if (ztarget_clear_pending_exception(&d->target, 0) < 0) {
+			printf("Windows exception control unavailable "
+			    "on this backend\n");
+			return -1;
+		}
+		printf("pending exception will be suppressed with "
+		    "DBG_CONTINUE\n");
+		return 0;
+	}
+
+	/* ex pass | nopass */
+	if (strcmp(t->v[1], "pass") == 0 || strcmp(t->v[1], "nopass") == 0) {
+		int pass = strcmp(t->v[1], "pass") == 0 ? 1 : 0;
+		if (ztarget_set_pending_exception(&d->target, 0,
+		    0, -1, pass) < 0) {
+			printf("Windows exception control unavailable "
+			    "on this backend or no exception pending\n");
+			return -1;
+		}
+		printf("pending exception: pass=%s (%s)\n",
+		    pass ? "yes" : "no",
+		    pass ? "DBG_EXCEPTION_NOT_HANDLED" : "DBG_CONTINUE");
+		return 0;
+	}
+
+	/* ex CODE pass|nopass */
+	if (t->n >= 3) {
+		uint32_t want;
+		int pass;
+		if (zexc_parse(t->v[1], &want) < 0) {
+			printf("unknown exception: %s\n", t->v[1]);
+			return -1;
+		}
+		if (strcmp(t->v[2], "pass") == 0)
+			pass = 1;
+		else if (strcmp(t->v[2], "nopass") == 0)
+			pass = 0;
+		else {
+			printf("expected pass or nopass, got %s\n",
+			    t->v[2]);
+			return -1;
+		}
+		if (ztarget_get_pending_exception(&d->target, 0, &code,
+		    &fc, &cur_pass) < 0) {
+			printf("Windows exception control unavailable "
+			    "on this backend or no exception pending\n");
+			return -1;
+		}
+		if (code != want) {
+			printf("pending exception is 0x%08x, not 0x%08x\n",
+			    (unsigned int)code, (unsigned int)want);
+			return -1;
+		}
+		if (ztarget_set_pending_exception(&d->target, 0,
+		    want, fc, pass) < 0) {
+			printf("set pending exception failed\n");
+			return -1;
+		}
+		printf("pending exception %s(0x%08x): pass=%s\n",
+		    zexc_name(code), (unsigned int)code,
+		    pass ? "yes" : "no");
+		return 0;
+	}
+
+	printf("usage: ex | ex -l | ex 0 | ex pass|nopass"
+	    " | ex CODE pass|nopass\n");
+	return -1;
 }
 
 /* --- pl / pu / pr / pf / ps / pw ------------------------------- */
@@ -2711,6 +2957,7 @@ zdbg_init(struct zdbg *d)
 	zmaps_init(&d->maps);
 	zsyms_init(&d->syms);
 	zsig_table_init(&d->sigs);
+	zexc_table_init(&d->excs);
 	zpatch_table_init(&d->patches);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
@@ -2841,6 +3088,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_th(d, &t);
 	if (strcmp(mn, "sig") == 0)
 		return cmd_sig(d, &t);
+	if (strcmp(mn, "ex") == 0)
+		return cmd_ex(d, &t);
 	if (strcmp(mn, "handle") == 0)
 		return cmd_handle(d, &t);
 

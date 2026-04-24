@@ -174,3 +174,25 @@ ztarget_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
 {
 	return ZBACKEND(set_pending_signal)(t, tid, sig);
 }
+
+int
+ztarget_get_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t *codep, int *first_chancep, int *passp)
+{
+	return ZBACKEND(get_pending_exception)(t, tid, codep,
+	    first_chancep, passp);
+}
+
+int
+ztarget_set_pending_exception(struct ztarget *t, uint64_t tid,
+    uint32_t code, int first_chance, int pass)
+{
+	return ZBACKEND(set_pending_exception)(t, tid, code, first_chance,
+	    pass);
+}
+
+int
+ztarget_clear_pending_exception(struct ztarget *t, uint64_t tid)
+{
+	return ZBACKEND(clear_pending_exception)(t, tid);
+}
