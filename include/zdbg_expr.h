@@ -20,6 +20,7 @@
 #include "zdbg_regs.h"
 
 struct zmap_table;
+struct zsym_table;
 
 int zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out);
 
@@ -38,5 +39,24 @@ int zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out);
  */
 int zexpr_eval_maps(const char *s, const struct zregs *regs,
     const struct zmap_table *maps, zaddr_t *out);
+
+/*
+ * Full expression evaluator: numbers, registers, map-relative
+ * and ELF symbol names (unqualified and "module:symbol").  If
+ * either maps or syms is NULL, the corresponding feature is
+ * skipped.
+ *
+ * Resolution precedence:
+ *   1. numeric / register
+ *   2. if token contains ':'   -> qualified symbol lookup
+ *   3. if expression has a + or - and the LHS matches a
+ *      mapping name, use mapping-relative semantics
+ *      (preserves "main+1000" and "libc+18a70")
+ *   4. exact symbol name
+ *   5. mapping base lookup
+ */
+int zexpr_eval_symbols(const char *s, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zaddr_t *out);
 
 #endif /* ZDBG_EXPR_H */
