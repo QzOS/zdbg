@@ -289,8 +289,10 @@ test_resolve_file(void)
 static int
 file_read_at(const char *path, uint64_t off, uint8_t *buf, size_t len)
 {
-	FILE *f = fopen(path, "rb");
+	FILE *f;
 	size_t r;
+
+	f = fopen(path, "rb");
 	if (f == NULL)
 		return -1;
 	if (fseek(f, (long)off, SEEK_SET) != 0) {
@@ -306,8 +308,10 @@ static int
 file_write_at(const char *path, uint64_t off, const uint8_t *buf,
     size_t len)
 {
-	FILE *f = fopen(path, "wb");
+	FILE *f;
 	size_t w;
+
+	f = fopen(path, "wb");
 	if (f == NULL)
 		return -1;
 	(void)off;

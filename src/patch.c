@@ -218,6 +218,7 @@ zpatch_resolve_file(struct zpatch *p, const struct zmap_table *maps)
 {
 	uint64_t off = 0;
 	char file[ZDBG_PATCH_FILE_MAX];
+	size_t n;
 
 	if (p == NULL)
 		return -1;
@@ -229,13 +230,11 @@ zpatch_resolve_file(struct zpatch *p, const struct zmap_table *maps)
 	if (zpatch_va_to_file(maps, p->addr, p->len, file, sizeof(file),
 	    &off) < 0)
 		return -1;
-	{
-		size_t n = strlen(file);
-		if (n >= sizeof(p->file))
-			n = sizeof(p->file) - 1;
-		memcpy(p->file, file, n);
-		p->file[n] = 0;
-	}
+	n = strlen(file);
+	if (n >= sizeof(p->file))
+		n = sizeof(p->file) - 1;
+	memcpy(p->file, file, n);
+	p->file[n] = 0;
 	p->file_off = off;
 	p->has_file = 1;
 	return 0;
