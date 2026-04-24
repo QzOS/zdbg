@@ -17,6 +17,7 @@
 #include "zdbg.h"
 #include "zdbg_patch.h"
 #include "zdbg_maps.h"
+#include "zdbg_pe.h"
 
 void
 zpatch_table_init(struct zpatch_table *pt)
@@ -82,6 +83,8 @@ zpatch_record(struct zpatch_table *pt, zaddr_t addr,
 	p->has_file = 0;
 	p->file[0] = 0;
 	p->file_off = 0;
+	p->has_rva = 0;
+	p->rva = 0;
 	return id;
 }
 
@@ -179,13 +182,43 @@ is_deleted_mapping(const char *name)
 	return memcmp(name + n - sl, suffix, sl) == 0;
 }
 
+/*
+ * Reject paths that we know we cannot persist to as a normal
+ * file: empty names, the synthetic "module@<hex>" fallback used
+ * when GetFinalPathNameByHandleA fails, and NT device paths
+ * starting with "\Device\".  Anything else is left to fopen()
+ * to accept or reject.
+ */
+static int
+is_unopenable_pe_path(const char *name)
+{
+	if (name == NULL || name[0] == 0)
+		return 1;
+	if (strncmp(name, "module@", 7) == 0)
+		return 1;
+	if (strncmp(name, "\\Device\\", 8) == 0)
+		return 1;
+	return 0;
+}
+
 int
 zpatch_va_to_file(const struct zmap_table *maps, zaddr_t addr, size_t len,
     char *file, size_t filecap, uint64_t *offp)
 {
+	return zpatch_va_to_file_ex(maps, addr, len, file, filecap, offp,
+	    NULL, NULL);
+}
+
+int
+zpatch_va_to_file_ex(const struct zmap_table *maps, zaddr_t addr,
+    size_t len, char *file, size_t filecap, uint64_t *offp,
+    uint64_t *rvap, int *via_pe)
+{
 	const struct zmap *m;
 	size_t nlen;
 
+	if (via_pe != NULL)
+		*via_pe = 0;
 	if (maps == NULL || len == 0)
 		return -1;
 	m = zmaps_find_by_addr(maps, addr);
@@ -200,31 +233,59 @@ zpatch_va_to_file(const struct zmap_table *maps, zaddr_t addr, size_t len,
 		return -1;
 	if (is_deleted_mapping(m->name))
 		return -1;
-	/*
-	 * Only accept maps whose (offset, start, end) have a raw
-	 * on-disk byte correspondence.  Windows synthetic module
-	 * maps are page-permission-less image mappings and would
-	 * otherwise let `pw` compute an RVA as a file offset.
-	 */
-	if (!m->raw_file_offset_valid)
-		return -1;
 
-	if (file != NULL && filecap > 0) {
-		nlen = strlen(m->name);
-		if (nlen >= filecap)
-			nlen = filecap - 1;
-		memcpy(file, m->name, nlen);
-		file[nlen] = 0;
+	if (m->raw_file_offset_valid) {
+		if (file != NULL && filecap > 0) {
+			nlen = strlen(m->name);
+			if (nlen >= filecap)
+				nlen = filecap - 1;
+			memcpy(file, m->name, nlen);
+			file[nlen] = 0;
+		}
+		if (offp != NULL)
+			*offp = (uint64_t)(m->offset +
+			    (addr - m->start));
+		return 0;
 	}
-	if (offp != NULL)
-		*offp = (uint64_t)(m->offset + (addr - m->start));
-	return 0;
+
+	/*
+	 * Synthetic image map (Windows).  Try the PE-aware path:
+	 * if `m->name` is an openable PE32+ file on disk and the
+	 * RVA range maps entirely to one section's raw bytes,
+	 * succeed with the computed file offset.
+	 */
+	if (is_unopenable_pe_path(m->name))
+		return -1;
+	{
+		uint64_t rva;
+		uint64_t off = 0;
+
+		rva = (uint64_t)(addr - m->start);
+		if (zpe_file_rva_to_offset(m->name, rva, len, &off) < 0)
+			return -1;
+		if (file != NULL && filecap > 0) {
+			nlen = strlen(m->name);
+			if (nlen >= filecap)
+				nlen = filecap - 1;
+			memcpy(file, m->name, nlen);
+			file[nlen] = 0;
+		}
+		if (offp != NULL)
+			*offp = off;
+		if (rvap != NULL)
+			*rvap = rva;
+		if (via_pe != NULL)
+			*via_pe = 1;
+		return 0;
+	}
 }
 
 int
 zpatch_resolve_file(struct zpatch *p, const struct zmap_table *maps)
 {
 	uint64_t off = 0;
+	uint64_t rva = 0;
+	int via_pe = 0;
 	char file[ZDBG_PATCH_FILE_MAX];
 	size_t n;
 
@@ -233,10 +294,12 @@ zpatch_resolve_file(struct zpatch *p, const struct zmap_table *maps)
 	p->has_file = 0;
 	p->file[0] = 0;
 	p->file_off = 0;
+	p->has_rva = 0;
+	p->rva = 0;
 	if (maps == NULL)
 		return -1;
-	if (zpatch_va_to_file(maps, p->addr, p->len, file, sizeof(file),
-	    &off) < 0)
+	if (zpatch_va_to_file_ex(maps, p->addr, p->len, file, sizeof(file),
+	    &off, &rva, &via_pe) < 0)
 		return -1;
 	n = strlen(file);
 	if (n >= sizeof(p->file))
@@ -245,5 +308,9 @@ zpatch_resolve_file(struct zpatch *p, const struct zmap_table *maps)
 	p->file[n] = 0;
 	p->file_off = off;
 	p->has_file = 1;
+	if (via_pe) {
+		p->has_rva = 1;
+		p->rva = rva;
+	}
 	return 0;
 }

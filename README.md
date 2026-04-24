@@ -112,11 +112,13 @@ Windows.
   known debug-event threads and are not yet a fully non-stop
   multi-thread solution.  Windows `lm` lists module images,
   not full `VirtualQueryEx` memory regions.  Windows symbols
-  are PE exports only (no imports, no forwarders).  Patch
-  journal works for live memory, but `pw` file persistence
-  is not available on Windows: the synthetic image maps are
-  flagged non-raw-file-offset-valid and `pw` refuses them
-  until real PE RVA-to-file-offset support is implemented.
+  are PE exports only (no imports, no forwarders).  Windows
+  patch persistence: zdbg can persist in-place patches to PE
+  files when the patched RVA maps entirely to raw bytes in one
+  PE section and the current file bytes still match recorded
+  old bytes.  It does not update PE checksum, certificates,
+  signatures, relocations, or metadata, so any Authenticode
+  signature on the file will become invalid after `pw`.
   POSIX `sig`/`handle` for signals remains Linux-only; on
   Windows `handle` operates on exception codes instead and
   `ex` manages the pending `ContinueDebugEvent` status.  `bt`
@@ -287,12 +289,15 @@ requires a stronger all-stop guarantee than the current
 backend provides.
 
 Patch persistence (`pw`) writes raw file bytes only.  It does
-not update ELF metadata, relocations, checksums, signatures,
+not update ELF/PE metadata, relocations, checksums, signatures,
 or section sizes, and will not create files, follow deleted
-mappings, or touch bracketed/anonymous mappings.  It refuses
-to write when the current on-disk bytes at the mapped file
-offset no longer match the bytes that were captured when the
-patch was recorded.  Undo is byte-level and not
+mappings, or touch bracketed/anonymous mappings.  On Windows it
+also refuses synthetic/device-path module names, patches whose
+RVA lands in BSS/uninitialized PE virtual tail bytes, and
+ranges that span more than one PE section.  It refuses to write
+when the current on-disk bytes at the mapped file offset no
+longer match the bytes that were captured when the patch was
+recorded.  Undo is byte-level and not
 dependency-aware for overlapping patches: `pu id` restores the
 original old bytes regardless of any later overlapping patch.
 Reapply (`pr`) is symmetric to `pu`.  The journal has a fixed

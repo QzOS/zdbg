@@ -2559,9 +2559,16 @@ print_patch_row(struct zdbg *d, int id, const struct zpatch *p)
 	    (unsigned long long)p->addr, p->len,
 	    p->origin[0] ? p->origin : "?",
 	    oldhex, newhex);
-	if (p->has_file)
-		printf(" file=%s+0x%llx", p->file,
-		    (unsigned long long)p->file_off);
+	if (p->has_file) {
+		if (p->has_rva)
+			printf(" file=%s+rva:0x%llx/file:0x%llx",
+			    p->file,
+			    (unsigned long long)p->rva,
+			    (unsigned long long)p->file_off);
+		else
+			printf(" file=%s+0x%llx", p->file,
+			    (unsigned long long)p->file_off);
+	}
 	if (ann[0])
 		printf("%s", ann);
 	printf("\n");
@@ -2704,7 +2711,7 @@ cmd_pf(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	if (!p->has_file) {
-		printf("patch %d has no file backing\n", id);
+		printf("patch %d has no safe file backing\n", id);
 		return 0;
 	}
 	annot_addr(d, p->addr, ann, sizeof(ann));
@@ -2713,6 +2720,9 @@ cmd_pf(struct zdbg *d, struct toks *t)
 	    (unsigned long long)p->addr, ann);
 	printf("  len:      %zu\n", p->len);
 	printf("  file:     %s\n", p->file);
+	if (p->has_rva)
+		printf("  rva:      0x%llx\n",
+		    (unsigned long long)p->rva);
 	printf("  fileoff:  0x%llx\n", (unsigned long long)p->file_off);
 	printf("  state:    %s\n",
 	    p->state == ZPATCH_APPLIED ? "applied" :
@@ -2891,6 +2901,17 @@ write_patch_to_file(const struct zpatch *p)
 	return 0;
 }
 
+static const char *
+pw_warning_for(int has_pe)
+{
+	if (has_pe)
+		return "warning: writing mapped PE file bytes on disk; "
+		    "no PE checksum, certificate, signature, "
+		    "relocation, or metadata is updated";
+	return "warning: writing mapped file bytes on disk; no ELF "
+	    "metadata is updated";
+}
+
 static int
 cmd_pw(struct zdbg *d, struct toks *t)
 {
@@ -2899,14 +2920,26 @@ cmd_pw(struct zdbg *d, struct toks *t)
 	int i;
 	int nok = 0;
 	int nfail = 0;
+	int any_pe;
 
 	if (t->n < 2) {
 		printf("usage: pw id|*\n");
 		return -1;
 	}
-	printf("warning: writing mapped file bytes on disk; no ELF "
-	    "metadata is updated\n");
 	if (strcmp(t->v[1], "*") == 0) {
+		any_pe = 0;
+		for (i = 0; i < ZDBG_MAX_PATCHES; i++) {
+			p = &d->patches.patches[i];
+			if (p->state != ZPATCH_APPLIED)
+				continue;
+			if (!p->has_file)
+				continue;
+			if (p->has_rva) {
+				any_pe = 1;
+				break;
+			}
+		}
+		printf("%s\n", pw_warning_for(any_pe));
 		for (i = 0; i < ZDBG_MAX_PATCHES; i++) {
 			p = &d->patches.patches[i];
 			if (p->state != ZPATCH_APPLIED)
@@ -2935,6 +2968,11 @@ cmd_pw(struct zdbg *d, struct toks *t)
 		printf("no patch %d\n", id);
 		return -1;
 	}
+	if (!p->has_file) {
+		printf("patch %d has no safe file backing\n", id);
+		return -1;
+	}
+	printf("%s\n", pw_warning_for(p->has_rva));
 	if (write_patch_to_file(p) < 0)
 		return -1;
 	printf("wrote patch %d to %s at file offset 0x%llx\n",
