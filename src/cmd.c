@@ -23,6 +23,7 @@
 #include "zdbg_target.h"
 #include "zdbg_tinyasm.h"
 #include "zdbg_tinydis.h"
+#include "zdbg_patch.h"
 
 #define RC_QUIT 1
 
@@ -120,6 +121,12 @@ print_help(void)
 	    "  a [addr]             interactive tiny assemble\n"
 	    "  pa addr len insn     patch instruction + NOP fill\n"
 	    "  ij addr              invert jz/jnz at addr\n"
+	    "  pl                   list recorded patches\n"
+	    "  pu id|*              undo/revert patch(es) in live memory\n"
+	    "  pr id|*              reapply reverted patch(es)\n"
+	    "  pf id                show file mapping for patch\n"
+	    "  ps id|* path         save patch bytes or patch script\n"
+	    "  pw id|*              write applied patch(es) back to file\n"
 	    "  b [addr]             list/set breakpoint\n"
 	    "  bc n|*               clear breakpoint\n"
 	    "  bd n                 disable breakpoint\n"
@@ -448,6 +455,93 @@ cmd_d(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- patch journal helper -------------------------------------- */
+
+/*
+ * Central memory-write helper for user-initiated patch commands.
+ *
+ * Reads the current bytes at addr, writes the new bytes, flushes
+ * the instruction cache, and records the change in d->patches
+ * with the given origin string ("e", "f", "a", "pa", "ij").
+ *
+ * On successful record the patch id and address are printed.
+ * File-backing is resolved from the current map table, but
+ * writing to disk is always explicit (`pw`) and never implicit.
+ *
+ * Returns 0 on success, -1 on failure (with a message printed).
+ */
+static int
+zdbg_patch_write(struct zdbg *d, zaddr_t addr, const void *new_bytes,
+    size_t len, const char *origin)
+{
+	uint8_t oldb[ZDBG_PATCH_MAX_BYTES];
+	int id;
+	const struct zpatch *rec;
+	int overlap;
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+
+	if (!have_target(d)) {
+		printf("target operation not available in this backend yet\n");
+		return -1;
+	}
+	if (!target_stopped(d)) {
+		printf("no stopped target\n");
+		return -1;
+	}
+	if (len == 0) {
+		printf("empty patch\n");
+		return -1;
+	}
+	if (len > ZDBG_PATCH_MAX_BYTES) {
+		printf("patch too large to record; max %d bytes\n",
+		    (int)ZDBG_PATCH_MAX_BYTES);
+		return -1;
+	}
+
+	if (ztarget_read(&d->target, addr, oldb, len) < 0) {
+		printf("read failed\n");
+		return -1;
+	}
+	if (ztarget_write(&d->target, addr, new_bytes, len) < 0) {
+		printf("write failed\n");
+		return -1;
+	}
+	(void)ztarget_flush_icache(&d->target, addr, len);
+
+	overlap = zpatch_find_overlap(&d->patches, addr, len);
+	if (overlap >= 0)
+		printf("warn: patch overlaps existing patch %d\n", overlap);
+
+	id = zpatch_record(&d->patches, addr, oldb, new_bytes, len, origin);
+	if (id < 0) {
+		if (id == -2)
+			printf("patch too large to record; max %d bytes\n",
+			    (int)ZDBG_PATCH_MAX_BYTES);
+		else
+			printf("patch journal full\n");
+		/* memory was still written; this is intentional */
+		return 0;
+	}
+	/* file backing (optional) */
+	if (have_target(d) && !d->have_maps)
+		refresh_maps(d);
+	if (d->have_maps)
+		(void)zpatch_resolve_file(&d->patches.patches[id], &d->maps);
+
+	if (zpatch_get(&d->patches, id, &rec) < 0)
+		return 0;
+	annot_addr(d, addr, ann, sizeof(ann));
+	if (rec->has_file) {
+		printf("patch %d %016llx len=%zu%s file=%s+0x%llx\n",
+		    id, (unsigned long long)addr, len, ann,
+		    rec->file, (unsigned long long)rec->file_off);
+	} else {
+		printf("patch %d %016llx len=%zu%s [no file backing]\n",
+		    id, (unsigned long long)addr, len, ann);
+	}
+	return 0;
+}
+
 /* --- e --------------------------------------------------------- */
 static int
 cmd_e(struct zdbg *d, struct toks *t)
@@ -469,13 +563,7 @@ cmd_e(struct zdbg *d, struct toks *t)
 		printf("bad bytes\n");
 		return -1;
 	}
-	if (!have_target(d) ||
-	    ztarget_write(&d->target, addr, buf, blen) < 0) {
-		printf("target operation not available in this backend yet\n");
-		return -1;
-	}
-	(void)ztarget_flush_icache(&d->target, addr, blen);
-	return 0;
+	return zdbg_patch_write(d, addr, buf, blen, "e");
 }
 
 /* --- f --------------------------------------------------------- */
@@ -516,13 +604,7 @@ cmd_f(struct zdbg *d, struct toks *t)
 		len = sizeof(buf);
 	for (i = 0; i < len; i++)
 		buf[i] = pat[i % patlen];
-	if (!have_target(d) ||
-	    ztarget_write(&d->target, addr, buf, (size_t)len) < 0) {
-		printf("target operation not available in this backend yet\n");
-		return -1;
-	}
-	(void)ztarget_flush_icache(&d->target, addr, (size_t)len);
-	return 0;
+	return zdbg_patch_write(d, addr, buf, (size_t)len, "f");
 }
 
 /* --- u --------------------------------------------------------- */
@@ -640,12 +722,9 @@ cmd_a(struct zdbg *d, struct toks *t)
 			printf("%02x ", enc.code[i]);
 		printf("\n");
 		if (have_target(d)) {
-			if (ztarget_write(&d->target, addr, enc.code,
-			    enc.len) < 0) {
-				printf("write failed (backend unavailable)\n");
-			} else {
-				(void)ztarget_flush_icache(&d->target, addr,
-				    enc.len);
+			if (zdbg_patch_write(d, addr, enc.code, enc.len,
+			    "a") < 0) {
+				/* message already printed */
 			}
 		}
 		addr += enc.len;
@@ -688,13 +767,8 @@ cmd_pa(struct zdbg *d, struct toks *t)
 			printf(" %02x", buf[i]);
 		printf("\n");
 	}
-	if (have_target(d)) {
-		if (ztarget_write(&d->target, addr, buf, out_len) < 0)
-			printf("target operation not available in this "
-			    "backend yet\n");
-		else
-			(void)ztarget_flush_icache(&d->target, addr, out_len);
-	}
+	if (have_target(d))
+		return zdbg_patch_write(d, addr, buf, out_len, "pa");
 	return 0;
 }
 
@@ -723,12 +797,7 @@ cmd_ij(struct zdbg *d, struct toks *t)
 		printf("no jz/jnz at %016llx\n", (unsigned long long)addr);
 		return -1;
 	}
-	if (ztarget_write(&d->target, addr, buf, used) < 0) {
-		printf("write failed\n");
-		return -1;
-	}
-	(void)ztarget_flush_icache(&d->target, addr, used);
-	return 0;
+	return zdbg_patch_write(d, addr, buf, used, "ij");
 }
 
 /* --- b / bc / bd / be ------------------------------------------ */
@@ -1929,6 +1998,7 @@ cmd_l(struct zdbg *d, struct toks *t)
 	printf("launched pid %llu\n", (unsigned long long)d->target.pid);
 	zhwbp_table_init(&d->hwbps);
 	d->stopped_hwbp = -1;
+	zpatch_table_init(&d->patches);
 	clear_maps(d);
 	clear_syms(d);
 	zmaps_set_main_hint(&d->maps, argv[0]);
@@ -1962,6 +2032,7 @@ cmd_la(struct zdbg *d, struct toks *t)
 	printf("attached pid %llu\n", (unsigned long long)d->target.pid);
 	zhwbp_table_init(&d->hwbps);
 	d->stopped_hwbp = -1;
+	zpatch_table_init(&d->patches);
 	clear_maps(d);
 	clear_syms(d);
 	refresh_maps(d);
@@ -2148,6 +2219,456 @@ cmd_handle(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- pl / pu / pr / pf / ps / pw ------------------------------- */
+
+static int
+parse_patch_id(const char *s, int *idp)
+{
+	uint64_t v;
+	if (zexpr_eval(s, NULL, &v) < 0)
+		return -1;
+	if (v >= ZDBG_MAX_PATCHES)
+		return -1;
+	*idp = (int)v;
+	return 0;
+}
+
+static const char *
+patch_state_str(enum zpatch_state st)
+{
+	switch (st) {
+	case ZPATCH_APPLIED:  return "applied ";
+	case ZPATCH_REVERTED: return "reverted";
+	case ZPATCH_EMPTY:
+	default:              return "empty   ";
+	}
+}
+
+/*
+ * Render up to max_bytes hex bytes into buf; if the patch is
+ * longer, a trailing "..." is appended.  Output is always
+ * NUL-terminated.
+ */
+static void
+format_patch_bytes(char *buf, size_t buflen, const uint8_t *bytes,
+    size_t len, size_t max_bytes)
+{
+	size_t pos = 0;
+	size_t n = len < max_bytes ? len : max_bytes;
+	size_t i;
+
+	if (buf == NULL || buflen == 0)
+		return;
+	buf[0] = 0;
+	for (i = 0; i < n && pos + 3 < buflen; i++) {
+		int w = snprintf(buf + pos, buflen - pos,
+		    i + 1 == n ? "%02x" : "%02x ", bytes[i]);
+		if (w < 0)
+			return;
+		pos += (size_t)w;
+	}
+	if (len > max_bytes && pos + 4 < buflen)
+		snprintf(buf + pos, buflen - pos, " ...");
+}
+
+static void
+print_patch_row(struct zdbg *d, int id, const struct zpatch *p)
+{
+	char oldhex[64];
+	char newhex[64];
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+
+	format_patch_bytes(oldhex, sizeof(oldhex), p->old_bytes, p->len, 16);
+	format_patch_bytes(newhex, sizeof(newhex), p->new_bytes, p->len, 16);
+	annot_addr(d, p->addr, ann, sizeof(ann));
+	printf(" %3d %s %016llx len=%zu %-4s old=%s new=%s",
+	    id, patch_state_str(p->state),
+	    (unsigned long long)p->addr, p->len,
+	    p->origin[0] ? p->origin : "?",
+	    oldhex, newhex);
+	if (p->has_file)
+		printf(" file=%s+0x%llx", p->file,
+		    (unsigned long long)p->file_off);
+	if (ann[0])
+		printf("%s", ann);
+	printf("\n");
+}
+
+static int
+cmd_pl(struct zdbg *d, struct toks *t)
+{
+	int i;
+	int any = 0;
+
+	(void)t;
+	for (i = 0; i < ZDBG_MAX_PATCHES; i++) {
+		const struct zpatch *p = &d->patches.patches[i];
+		if (p->state == ZPATCH_EMPTY)
+			continue;
+		print_patch_row(d, i, p);
+		any = 1;
+	}
+	if (!any)
+		printf(" no patches\n");
+	return 0;
+}
+
+/*
+ * Apply one direction of a patch: if revert=1 write old_bytes,
+ * otherwise write new_bytes.  Updates patch state accordingly.
+ * Returns 0 on success, -1 on error (with a message printed).
+ */
+static int
+patch_apply_dir(struct zdbg *d, int id, int revert)
+{
+	const struct zpatch *p;
+	const uint8_t *src;
+
+	if (zpatch_get(&d->patches, id, &p) < 0) {
+		printf("no patch %d\n", id);
+		return -1;
+	}
+	if (revert) {
+		if (p->state != ZPATCH_APPLIED) {
+			printf("patch %d already reverted\n", id);
+			return -1;
+		}
+	} else {
+		if (p->state != ZPATCH_REVERTED) {
+			printf("patch %d already applied\n", id);
+			return -1;
+		}
+	}
+	src = revert ? p->old_bytes : p->new_bytes;
+	if (ztarget_write(&d->target, p->addr, src, p->len) < 0) {
+		printf("write failed\n");
+		return -1;
+	}
+	(void)ztarget_flush_icache(&d->target, p->addr, p->len);
+	if (revert)
+		(void)zpatch_mark_reverted(&d->patches, id);
+	else
+		(void)zpatch_mark_applied(&d->patches, id);
+	printf("patch %d %s\n", id, revert ? "reverted" : "reapplied");
+	return 0;
+}
+
+static int
+cmd_pu(struct zdbg *d, struct toks *t)
+{
+	int id;
+	int i;
+
+	if (t->n < 2) {
+		printf("usage: pu id|*\n");
+		return -1;
+	}
+	if (!have_target(d) || !target_stopped(d)) {
+		printf("no stopped target\n");
+		return -1;
+	}
+	if (strcmp(t->v[1], "*") == 0) {
+		/* revert applied patches in reverse order */
+		for (i = ZDBG_MAX_PATCHES - 1; i >= 0; i--) {
+			const struct zpatch *p = &d->patches.patches[i];
+			if (p->state != ZPATCH_APPLIED)
+				continue;
+			(void)patch_apply_dir(d, i, 1);
+		}
+		return 0;
+	}
+	if (parse_patch_id(t->v[1], &id) < 0) {
+		printf("bad id\n");
+		return -1;
+	}
+	return patch_apply_dir(d, id, 1);
+}
+
+static int
+cmd_pr(struct zdbg *d, struct toks *t)
+{
+	int id;
+	int i;
+
+	if (t->n < 2) {
+		printf("usage: pr id|*\n");
+		return -1;
+	}
+	if (!have_target(d) || !target_stopped(d)) {
+		printf("no stopped target\n");
+		return -1;
+	}
+	if (strcmp(t->v[1], "*") == 0) {
+		/* reapply in ascending order */
+		for (i = 0; i < ZDBG_MAX_PATCHES; i++) {
+			const struct zpatch *p = &d->patches.patches[i];
+			if (p->state != ZPATCH_REVERTED)
+				continue;
+			(void)patch_apply_dir(d, i, 0);
+		}
+		return 0;
+	}
+	if (parse_patch_id(t->v[1], &id) < 0) {
+		printf("bad id\n");
+		return -1;
+	}
+	return patch_apply_dir(d, id, 0);
+}
+
+static int
+cmd_pf(struct zdbg *d, struct toks *t)
+{
+	int id;
+	const struct zpatch *p;
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+
+	if (t->n < 2 || parse_patch_id(t->v[1], &id) < 0) {
+		printf("usage: pf id\n");
+		return -1;
+	}
+	if (zpatch_get(&d->patches, id, &p) < 0) {
+		printf("no patch %d\n", id);
+		return -1;
+	}
+	if (!p->has_file) {
+		printf("patch %d has no file backing\n", id);
+		return 0;
+	}
+	annot_addr(d, p->addr, ann, sizeof(ann));
+	printf("patch %d:\n", id);
+	printf("  va:       %016llx%s\n",
+	    (unsigned long long)p->addr, ann);
+	printf("  len:      %zu\n", p->len);
+	printf("  file:     %s\n", p->file);
+	printf("  fileoff:  0x%llx\n", (unsigned long long)p->file_off);
+	printf("  state:    %s\n",
+	    p->state == ZPATCH_APPLIED ? "applied" :
+	    p->state == ZPATCH_REVERTED ? "reverted" : "empty");
+	return 0;
+}
+
+/*
+ * Write the full new_bytes of one patch to the given path as a
+ * raw file.  Overwrites the file if it exists.  Returns 0 on
+ * success, -1 on failure.
+ */
+static int
+save_patch_raw(const struct zpatch *p, const char *path)
+{
+	FILE *f;
+	size_t w;
+
+	f = fopen(path, "wb");
+	if (f == NULL) {
+		printf("could not open %s for writing\n", path);
+		return -1;
+	}
+	w = fwrite(p->new_bytes, 1, p->len, f);
+	if (w != p->len) {
+		printf("short write to %s\n", path);
+		fclose(f);
+		return -1;
+	}
+	if (fclose(f) != 0) {
+		printf("close failed on %s\n", path);
+		return -1;
+	}
+	return 0;
+}
+
+static void
+fprint_hex_bytes(FILE *f, const uint8_t *b, size_t n)
+{
+	size_t i;
+	for (i = 0; i < n; i++)
+		fprintf(f, "%s%02x", i == 0 ? "" : " ", b[i]);
+}
+
+/*
+ * Write the full patch table to the given path as a simple
+ * textual script.  Only ZPATCH_APPLIED and ZPATCH_REVERTED
+ * entries are emitted.  Returns 0 on success, -1 on failure.
+ */
+static int
+save_patch_script(const struct zpatch_table *pt, const char *path)
+{
+	FILE *f;
+	int i;
+
+	f = fopen(path, "w");
+	if (f == NULL) {
+		printf("could not open %s for writing\n", path);
+		return -1;
+	}
+	fprintf(f, "# zdbg patch script v1\n");
+	fprintf(f, "# addr len origin file fileoff\n");
+	for (i = 0; i < ZDBG_MAX_PATCHES; i++) {
+		const struct zpatch *p = &pt->patches[i];
+		if (p->state == ZPATCH_EMPTY)
+			continue;
+		fprintf(f, "\npatch %016llx %zu %s",
+		    (unsigned long long)p->addr, p->len,
+		    p->origin[0] ? p->origin : "?");
+		if (p->has_file)
+			fprintf(f, " %s 0x%llx",
+			    p->file, (unsigned long long)p->file_off);
+		fprintf(f, "\nstate %s\n",
+		    p->state == ZPATCH_APPLIED ? "applied" : "reverted");
+		fprintf(f, "old ");
+		fprint_hex_bytes(f, p->old_bytes, p->len);
+		fprintf(f, "\nnew ");
+		fprint_hex_bytes(f, p->new_bytes, p->len);
+		fprintf(f, "\n");
+	}
+	if (fclose(f) != 0) {
+		printf("close failed on %s\n", path);
+		return -1;
+	}
+	return 0;
+}
+
+static int
+cmd_ps(struct zdbg *d, struct toks *t)
+{
+	int id;
+	const struct zpatch *p;
+
+	if (t->n < 3) {
+		printf("usage: ps id|* path\n");
+		return -1;
+	}
+	if (strcmp(t->v[1], "*") == 0) {
+		if (save_patch_script(&d->patches, t->v[2]) < 0)
+			return -1;
+		printf("wrote patch script to %s\n", t->v[2]);
+		return 0;
+	}
+	if (parse_patch_id(t->v[1], &id) < 0) {
+		printf("bad id\n");
+		return -1;
+	}
+	if (zpatch_get(&d->patches, id, &p) < 0) {
+		printf("no patch %d\n", id);
+		return -1;
+	}
+	if (save_patch_raw(p, t->v[2]) < 0)
+		return -1;
+	printf("wrote patch %d (%zu bytes) to %s\n", id, p->len, t->v[2]);
+	return 0;
+}
+
+/*
+ * Write one patch back to its mapped file, but only if the
+ * on-disk bytes at file_off still match the recorded old_bytes.
+ * This is intentionally conservative: it protects against
+ * overwriting a file that has been rebuilt/changed since the
+ * patch was recorded.
+ */
+static int
+write_patch_to_file(const struct zpatch *p)
+{
+	FILE *f;
+	uint8_t cur[ZDBG_PATCH_MAX_BYTES];
+	size_t r;
+
+	if (!p->has_file || p->file[0] == 0) {
+		printf("patch has no file backing\n");
+		return -1;
+	}
+	if (p->state != ZPATCH_APPLIED) {
+		printf("patch not applied\n");
+		return -1;
+	}
+	f = fopen(p->file, "r+b");
+	if (f == NULL) {
+		printf("could not open %s for read/write\n", p->file);
+		return -1;
+	}
+	if (fseek(f, (long)p->file_off, SEEK_SET) != 0) {
+		printf("seek failed on %s\n", p->file);
+		fclose(f);
+		return -1;
+	}
+	r = fread(cur, 1, p->len, f);
+	if (r != p->len) {
+		printf("short read from %s\n", p->file);
+		fclose(f);
+		return -1;
+	}
+	if (memcmp(cur, p->old_bytes, p->len) != 0) {
+		printf("file bytes do not match expected old bytes; "
+		    "refusing\n");
+		fclose(f);
+		return -1;
+	}
+	if (fseek(f, (long)p->file_off, SEEK_SET) != 0) {
+		printf("seek failed on %s\n", p->file);
+		fclose(f);
+		return -1;
+	}
+	if (fwrite(p->new_bytes, 1, p->len, f) != p->len) {
+		printf("write failed on %s\n", p->file);
+		fclose(f);
+		return -1;
+	}
+	if (fclose(f) != 0) {
+		printf("close failed on %s\n", p->file);
+		return -1;
+	}
+	return 0;
+}
+
+static int
+cmd_pw(struct zdbg *d, struct toks *t)
+{
+	int id;
+	const struct zpatch *p;
+	int i;
+	int nok = 0;
+	int nfail = 0;
+
+	if (t->n < 2) {
+		printf("usage: pw id|*\n");
+		return -1;
+	}
+	printf("warning: writing mapped file bytes on disk; no ELF "
+	    "metadata is updated\n");
+	if (strcmp(t->v[1], "*") == 0) {
+		for (i = 0; i < ZDBG_MAX_PATCHES; i++) {
+			p = &d->patches.patches[i];
+			if (p->state != ZPATCH_APPLIED)
+				continue;
+			if (!p->has_file)
+				continue;
+			if (write_patch_to_file(p) == 0) {
+				printf("wrote patch %d to %s at file "
+				    "offset 0x%llx\n",
+				    i, p->file,
+				    (unsigned long long)p->file_off);
+				nok++;
+			} else {
+				printf("patch %d: failed\n", i);
+				nfail++;
+			}
+		}
+		printf("pw: %d ok, %d failed\n", nok, nfail);
+		return 0;
+	}
+	if (parse_patch_id(t->v[1], &id) < 0) {
+		printf("bad id\n");
+		return -1;
+	}
+	if (zpatch_get(&d->patches, id, &p) < 0) {
+		printf("no patch %d\n", id);
+		return -1;
+	}
+	if (write_patch_to_file(p) < 0)
+		return -1;
+	printf("wrote patch %d to %s at file offset 0x%llx\n",
+	    id, p->file, (unsigned long long)p->file_off);
+	return 0;
+}
+
 /* --- top-level dispatch --------------------------------------- */
 
 void
@@ -2163,6 +2684,7 @@ zdbg_init(struct zdbg *d)
 	zmaps_init(&d->maps);
 	zsyms_init(&d->syms);
 	zsig_table_init(&d->sigs);
+	zpatch_table_init(&d->patches);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
@@ -2234,6 +2756,18 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_pa(d, &t);
 	if (strcmp(mn, "ij") == 0)
 		return cmd_ij(d, &t);
+	if (strcmp(mn, "pl") == 0)
+		return cmd_pl(d, &t);
+	if (strcmp(mn, "pu") == 0)
+		return cmd_pu(d, &t);
+	if (strcmp(mn, "pr") == 0)
+		return cmd_pr(d, &t);
+	if (strcmp(mn, "pf") == 0)
+		return cmd_pf(d, &t);
+	if (strcmp(mn, "ps") == 0)
+		return cmd_ps(d, &t);
+	if (strcmp(mn, "pw") == 0)
+		return cmd_pw(d, &t);
 	if (strcmp(mn, "b") == 0)
 		return cmd_b(d, &t);
 	if (strcmp(mn, "bc") == 0)

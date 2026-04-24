@@ -13,6 +13,7 @@
 #include "zdbg_maps.h"
 #include "zdbg_signal.h"
 #include "zdbg_symbols.h"
+#include "zdbg_patch.h"
 
 struct zdbg {
 	struct ztarget target;
@@ -22,6 +23,7 @@ struct zdbg {
 	struct zmap_table maps;
 	struct zsym_table syms;
 	struct zsig_table sigs;
+	struct zpatch_table patches;
 	zaddr_t dump_addr;
 	zaddr_t asm_addr;
 	int have_regs;

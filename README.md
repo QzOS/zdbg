@@ -61,6 +61,16 @@ Windows.
   resume; `handle` controls stop/pass/print policy.  Signal
   policy is process-wide inside zdbg, not per-thread.  Windows
   exception policy is not implemented yet.
+* Patch journal: user memory writes (`e`, `f`, `a`, `pa`, `ij`)
+  are recorded with old/new bytes and can be listed (`pl`),
+  reverted (`pu`), reapplied (`pr`), saved as raw bytes or a
+  simple textual script (`ps`), and, for file-backed mappings,
+  explicitly written back to disk (`pw`) only when the current
+  file bytes still match the recorded old bytes.  Software
+  breakpoint memory writes are not recorded.  The journal is
+  cleared on new launch/attach and kept across detach/kill so
+  patches can still be inspected or saved after the process is
+  gone.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 
 On non-Linux hosts every target-dependent command still prints
@@ -78,7 +88,11 @@ deliberately avoids:
 * a full x86 assembler or disassembler
 * Capstone / Keystone / libbfd / LLVM
 * scripting, plugins, remote debugging, GUI
-* file patching
+* general binary rewriting (ELF metadata, relocations,
+  section growth, checksums, signatures, PE/COFF or Mach-O
+  writing, trampoline generation, or diff formats).  `pw` does
+  only raw byte patches to file-backed mappings and only when
+  the current file bytes match the recorded old bytes.
 
 ## Build
 
@@ -111,6 +125,14 @@ Run the debugger:
     a [addr]             tiny assemble
     pa addr len insn     patch instruction + NOP fill
     ij addr              invert jz/jnz
+    pl                   list recorded user patches
+    pu id|*              undo/revert patch(es) in live memory
+    pr id|*              reapply reverted patch(es)
+    pf id                show file mapping for patch
+    ps id path           save raw patch bytes for one patch
+    ps * path            save textual patch script for all patches
+    pw id|*              write applied patch(es) back to mapped
+                         file, conservatively (old bytes must match)
     b [addr]             list/set breakpoint
     bc n|*               clear breakpoint
     bd n                 disable breakpoint
@@ -204,6 +226,20 @@ the internal single-step + reinstall, another thread can run
 briefly over the uninstalled byte.  Fixing this properly
 requires a stronger all-stop guarantee than the current
 backend provides.
+
+Patch persistence (`pw`) writes raw file bytes only.  It does
+not update ELF metadata, relocations, checksums, signatures,
+or section sizes, and will not create files, follow deleted
+mappings, or touch bracketed/anonymous mappings.  It refuses
+to write when the current on-disk bytes at the mapped file
+offset no longer match the bytes that were captured when the
+patch was recorded.  Undo is byte-level and not
+dependency-aware for overlapping patches: `pu id` restores the
+original old bytes regardless of any later overlapping patch.
+Reapply (`pr`) is symmetric to `pu`.  The journal has a fixed
+capacity of 256 patches of up to 256 bytes each; writes
+exceeding that are rejected with a clear message.  Script
+loading is not implemented yet.
 
 Typical session:
 
