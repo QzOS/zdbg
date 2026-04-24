@@ -223,8 +223,11 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 	 * If a hardware breakpoint/watchpoint fired, report it
 	 * distinctly from software breakpoints.  d->stopped_hwbp
 	 * is set by zdbg_after_wait before zstop_print is called.
+	 * On Windows hardware traps arrive as EXCEPTION_SINGLE_STEP
+	 * (mapped to ZSTOP_SINGLESTEP) so recognize that too.
 	 */
-	if (st->reason == ZSTOP_BREAKPOINT && d != NULL &&
+	if ((st->reason == ZSTOP_BREAKPOINT ||
+	    st->reason == ZSTOP_SINGLESTEP) && d != NULL &&
 	    d->stopped_hwbp >= 0 &&
 	    d->stopped_hwbp < ZDBG_MAX_HWBP) {
 		const struct zhwbp *b = &d->hwbps.bp[d->stopped_hwbp];
@@ -1197,6 +1200,25 @@ zdbg_after_wait(struct zdbg *d, struct zstop *st, int *bp_idp)
 				if (d->have_regs)
 					st->addr = d->regs.rip;
 			}
+		}
+	} else if (st != NULL && st->reason == ZSTOP_SINGLESTEP &&
+	    target_stopped(d) && d->have_regs) {
+		/*
+		 * On Windows (and in principle any x86 target)
+		 * hardware breakpoints/watchpoints are delivered as
+		 * EXCEPTION_SINGLE_STEP.  The backend cannot claim
+		 * them because it does not know the generic hwbp
+		 * table, so try DR6 here.  If no known slot matches
+		 * we leave the stop as a normal single-step and user
+		 * `t` behaves exactly as before.
+		 */
+		int hw_id = -1;
+		uint64_t dr6 = 0;
+		int hrc = zhwbp_handle_trap(&d->target, &d->hwbps,
+		    &hw_id, &dr6);
+		if (hrc == 1) {
+			d->stopped_hwbp = hw_id;
+			st->addr = d->regs.rip;
 		}
 	}
 }

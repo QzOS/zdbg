@@ -19,9 +19,8 @@ Windows.
   `sym`/`b module:symbol` resolve PE export symbols loaded
   from target memory.  `sym kernel32:CreateFileW` and
   `b kernel32:CreateFileW` work for exported symbols.
-  PDB/CodeView/private symbols, hardware breakpoints,
-  watchpoints, WOW64, and Windows exception policy are not
-  implemented yet.
+  PDB/CodeView/private symbols, WOW64, and Windows exception
+  policy are not implemented yet.
 * Breakpoints: software breakpoints (`int3`) support RIP-1
   correction, original-byte restore, single-step rearm, and
   continue from breakpoint for the current single traced Linux
@@ -52,6 +51,16 @@ Windows.
   resume, so watchpoints fire on any thread that writes the
   watched address.  Very newly-cloned threads may run briefly
   without DR state until the next ptrace stop is observed.
+  Windows x64 DR0-DR7 support uses `CONTEXT_DEBUG_REGISTERS`
+  for execute, write, and read/write watchpoints through the
+  same generic `hb`/`hw`/`hl`/`hc`/`hd`/`he` commands.  Four
+  slots only.  Settings are programmed into every known
+  debug-event thread; very new threads may run briefly
+  without DR state until the next debug event is processed.
+  Hardware traps on Windows arrive as `EXCEPTION_SINGLE_STEP`
+  and are distinguished from user single-step via DR6.
+  No thread-specific hwbp UI, no WOW64/32-bit target DR
+  support.
 * Proceed/step-over (`p`) only supports direct `call rel32`
   initially.  Indirect calls and complex instruction decoding
   remain out of scope.
@@ -87,15 +96,16 @@ Windows.
   gone.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 * Windows support is younger than Linux support.  No PDB, no
-  CodeView, no private/COFF symbols, no hardware breakpoints
-  or watchpoints, no Windows exception policy, no WOW64.
-  Windows `lm` lists module images, not full `VirtualQueryEx`
-  memory regions.  Windows symbols are PE exports only (no
-  imports, no forwarders).  Patch journal works for live
-  memory, but `pw` file persistence is not available on
-  Windows: the synthetic image maps are flagged
-  non-raw-file-offset-valid and `pw` refuses them until
-  real PE RVA-to-file-offset support is implemented.
+  CodeView, no private/COFF symbols, no Windows exception
+  policy, no WOW64.  Windows hardware watchpoints rely on
+  known debug-event threads and are not yet a fully non-stop
+  multi-thread solution.  Windows `lm` lists module images,
+  not full `VirtualQueryEx` memory regions.  Windows symbols
+  are PE exports only (no imports, no forwarders).  Patch
+  journal works for live memory, but `pw` file persistence
+  is not available on Windows: the synthetic image maps are
+  flagged non-raw-file-offset-valid and `pw` refuses them
+  until real PE RVA-to-file-offset support is implemented.
   POSIX `sig`/`handle` semantics remain Linux-only; `bt` on
   Windows relies on frame pointers as on Linux.
 

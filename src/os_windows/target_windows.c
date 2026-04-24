@@ -7,7 +7,7 @@
  * ReadProcessMemory/WriteProcessMemory, FlushInstructionCache,
  * and GetThreadContext/SetThreadContext.
  *
- * Scope (see issue #24):
+ * Scope (see issues #24, #28, #29):
  *   - launch, attach, detach, kill
  *   - wait with conservative event mapping
  *   - continue / single-step (trap flag)
@@ -15,12 +15,14 @@
  *   - x64 register get/set via CONTEXT
  *   - basic thread list/select from debug events
  *   - software breakpoints via EXCEPTION_BREAKPOINT mapping
+ *   - module maps / PE export symbols from debug events
+ *   - hardware breakpoints/watchpoints via CONTEXT_DEBUG_REGISTERS
  *
- * Not in scope (see issue #24):
- *   - PDB/DIA SDK / PE symbols / DWARF-on-Windows / source lines
- *   - module maps / hardware breakpoints / watchpoints
+ * Not in scope:
+ *   - PDB/DIA SDK / CodeView / private PE symbols / DWARF
  *   - Windows exception-policy UI / signal-style handle table
  *   - WOW64 / 32-bit x86 target support / remote debugging
+ *   - thread-specific hwbp UI / per-thread watchpoint UI
  *
  * <windows.h> must not be included anywhere else in the tree.
  */
@@ -83,6 +85,17 @@ struct zw_target {
 
 	struct zw_module modules[ZW_MAX_MODULES];
 	int nmodules;		/* high-water slot count */
+
+	/*
+	 * TID that the debugger explicitly asked to single-step
+	 * via ztarget_windows_singlestep(), or 0 when no step is
+	 * expected.  Used by the event loop to distinguish a
+	 * TF-driven EXCEPTION_SINGLE_STEP (which should map to
+	 * ZSTOP_SINGLESTEP) from a hardware-debug-register trap
+	 * (which should map to ZSTOP_BREAKPOINT so the generic
+	 * hwbp layer can claim it).
+	 */
+	DWORD singlestep_tid;
 };
 
 static struct zw_target *
@@ -713,6 +726,40 @@ zw_build_cmdline(int argc, char **argv)
 /* ---------------- exception mapping ---------------- */
 
 /*
+ * Check whether DR6 on the event thread indicates a hardware
+ * debug-register trap, i.e. any of B0..B3 is set.  Returns 1
+ * when a hardware trap bit is set, 0 otherwise, -1 when the
+ * context could not be read.  The DR6 value is intentionally
+ * not cleared here: the generic hwbp layer is responsible for
+ * clearing DR6 via the debug-register API so it can correlate
+ * the bit with its own slot table first.
+ */
+static int
+zw_event_dr6_hw_trap(struct zw_target *wt, DWORD tid)
+{
+	struct zw_thread *th;
+	CONTEXT ctx;
+
+#if !defined(_M_X64) && !defined(_M_AMD64) && !defined(__x86_64__)
+	(void)wt; (void)tid;
+	return -1;
+#else
+	if (wt == NULL)
+		return -1;
+	th = zw_find(wt, tid);
+	if (th == NULL || th->handle == NULL)
+		return -1;
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+	if (!GetThreadContext(th->handle, &ctx))
+		return -1;
+	if ((ctx.Dr6 & 0xfULL) != 0)
+		return 1;
+	return 0;
+#endif
+}
+
+/*
  * Map a first-chance exception into a zstop reason and decide
  * the default continue status.  For breakpoint and single-step
  * traps that zdbg drives we always return DBG_CONTINUE so the
@@ -726,6 +773,7 @@ zw_map_exception(struct zw_target *wt,
     const EXCEPTION_DEBUG_INFO *ex, struct zstop *st)
 {
 	DWORD code = ex->ExceptionRecord.ExceptionCode;
+	DWORD tid = wt->last_event.dwThreadId;
 	uint64_t addr = (uint64_t)(uintptr_t)
 	    ex->ExceptionRecord.ExceptionAddress;
 
@@ -744,11 +792,30 @@ zw_map_exception(struct zw_target *wt,
 		}
 		wt->continue_status = DBG_CONTINUE;
 		return;
-	case EXCEPTION_SINGLE_STEP:
-		st->reason = ZSTOP_SINGLESTEP;
+	case EXCEPTION_SINGLE_STEP: {
+		/*
+		 * Hardware breakpoints/watchpoints also arrive here
+		 * on x86.  Distinguish them from a normal TF-driven
+		 * step using the singlestep_tid expectation flag and
+		 * DR6.  If the stop is on a thread we asked to step
+		 * and DR6 shows no B0..B3 set, it is a genuine
+		 * single-step.  Otherwise treat it as a breakpoint-
+		 * like stop so the command layer routes it through
+		 * the generic hwbp handler.
+		 */
+		int is_hw = zw_event_dr6_hw_trap(wt, tid);
+		int expected_step = (wt->singlestep_tid != 0 &&
+		    wt->singlestep_tid == tid);
+		if (expected_step)
+			wt->singlestep_tid = 0;
+		if (is_hw == 1)
+			st->reason = ZSTOP_BREAKPOINT;
+		else
+			st->reason = ZSTOP_SINGLESTEP;
 		st->code = 0;
 		wt->continue_status = DBG_CONTINUE;
 		return;
+	}
 	default:
 		st->reason = ZSTOP_EXCEPTION;
 		wt->continue_status = DBG_EXCEPTION_NOT_HANDLED;
@@ -1047,6 +1114,22 @@ ztarget_windows_detach(struct ztarget *t)
 	if (wt == NULL)
 		return -1;
 
+	/*
+	 * Best-effort: clear hardware debug registers on every
+	 * known thread before giving up the debug session so the
+	 * detached process does not keep firing our DRn slots.
+	 * Failures are ignored: a stale/exited thread handle is
+	 * not worth aborting detach over.
+	 */
+	if (!wt->exited) {
+		(void)ztarget_windows_set_debugreg_all(t, 7, 0);
+		(void)ztarget_windows_set_debugreg_all(t, 0, 0);
+		(void)ztarget_windows_set_debugreg_all(t, 1, 0);
+		(void)ztarget_windows_set_debugreg_all(t, 2, 0);
+		(void)ztarget_windows_set_debugreg_all(t, 3, 0);
+		(void)ztarget_windows_set_debugreg_all(t, 6, 0);
+	}
+
 	if (wt->have_event) {
 		(void)ContinueDebugEvent(wt->last_event.dwProcessId,
 		    wt->last_event.dwThreadId, DBG_CONTINUE);
@@ -1145,6 +1228,14 @@ ztarget_windows_singlestep(struct ztarget *t)
 	ctx.EFlags |= 0x100u;	/* TF */
 	if (!SetThreadContext(h, &ctx))
 		return -1;
+
+	/*
+	 * Remember the thread we expect to single-step on, so the
+	 * event loop can distinguish a genuine TF stop from a
+	 * hardware debug-register trap that also arrives as
+	 * EXCEPTION_SINGLE_STEP.
+	 */
+	wt->singlestep_tid = wt->current_tid;
 
 	if (!ContinueDebugEvent(wt->last_event.dwProcessId,
 	    wt->last_event.dwThreadId, wt->continue_status))
@@ -1299,7 +1390,143 @@ ztarget_windows_setregs(struct ztarget *t, const struct zregs *r)
 #endif
 }
 
-/* ---------------- debug registers (not implemented) ---------------- */
+/* ---------------- debug registers ---------------- */
+
+/*
+ * Read/write one of the x86-64 debug registers DR0..DR3, DR6,
+ * DR7 via CONTEXT_DEBUG_REGISTERS.  DR4 and DR5 are reserved
+ * aliases on modern CPUs and are rejected along with any other
+ * regno.  On non-x64 Windows builds these return -1 because
+ * there is no stable mapping from the generic DR numbering to
+ * the platform CONTEXT.
+ */
+
+#if defined(_M_X64) || defined(_M_AMD64) || defined(__x86_64__)
+
+static int
+zw_ctx_get_dr(const CONTEXT *ctx, int regno, uint64_t *vp)
+{
+	switch (regno) {
+	case 0: *vp = (uint64_t)ctx->Dr0; return 0;
+	case 1: *vp = (uint64_t)ctx->Dr1; return 0;
+	case 2: *vp = (uint64_t)ctx->Dr2; return 0;
+	case 3: *vp = (uint64_t)ctx->Dr3; return 0;
+	case 6: *vp = (uint64_t)ctx->Dr6; return 0;
+	case 7: *vp = (uint64_t)ctx->Dr7; return 0;
+	default: return -1;
+	}
+}
+
+static int
+zw_ctx_set_dr(CONTEXT *ctx, int regno, uint64_t v)
+{
+	switch (regno) {
+	case 0: ctx->Dr0 = (DWORD64)v; return 0;
+	case 1: ctx->Dr1 = (DWORD64)v; return 0;
+	case 2: ctx->Dr2 = (DWORD64)v; return 0;
+	case 3: ctx->Dr3 = (DWORD64)v; return 0;
+	case 6: ctx->Dr6 = (DWORD64)v; return 0;
+	case 7: ctx->Dr7 = (DWORD64)v; return 0;
+	default: return -1;
+	}
+}
+
+static int
+zw_thread_get_debugreg(HANDLE h, int regno, uint64_t *vp)
+{
+	CONTEXT ctx;
+
+	if (h == NULL)
+		return -1;
+	memset(&ctx, 0, sizeof(ctx));
+	ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+	if (!GetThreadContext(h, &ctx))
+		return -1;
+	return zw_ctx_get_dr(&ctx, regno, vp);
+}
+
+static int
+zw_thread_set_debugreg(HANDLE h, int regno, uint64_t v)
+{
+	CONTEXT ctx;
+
+	if (h == NULL)
+		return -1;
+	memset(&ctx, 0, sizeof(ctx));
+	/*
+	 * Read-modify-write: Win32 does not let us touch a single
+	 * DR field in isolation, and the DR fields we do not
+	 * intend to change must be preserved.
+	 */
+	ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+	if (!GetThreadContext(h, &ctx))
+		return -1;
+	if (zw_ctx_set_dr(&ctx, regno, v) < 0)
+		return -1;
+	ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+	if (!SetThreadContext(h, &ctx))
+		return -1;
+	return 0;
+}
+
+int
+ztarget_windows_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
+{
+	struct zw_target *wt = zw_get(t);
+	HANDLE h;
+
+	if (wt == NULL || vp == NULL)
+		return -1;
+	if (regno != 0 && regno != 1 && regno != 2 && regno != 3 &&
+	    regno != 6 && regno != 7)
+		return -1;
+	h = zw_current_handle(wt);
+	if (h == NULL)
+		return -1;
+	return zw_thread_get_debugreg(h, regno, vp);
+}
+
+int
+ztarget_windows_set_debugreg(struct ztarget *t, int regno, uint64_t v)
+{
+	struct zw_target *wt = zw_get(t);
+	HANDLE h;
+
+	if (wt == NULL)
+		return -1;
+	if (regno != 0 && regno != 1 && regno != 2 && regno != 3 &&
+	    regno != 6 && regno != 7)
+		return -1;
+	h = zw_current_handle(wt);
+	if (h == NULL)
+		return -1;
+	return zw_thread_set_debugreg(h, regno, v);
+}
+
+int
+ztarget_windows_set_debugreg_all(struct ztarget *t, int regno, uint64_t v)
+{
+	struct zw_target *wt = zw_get(t);
+	int i;
+	int ok = 0;
+
+	if (wt == NULL)
+		return -1;
+	if (regno != 0 && regno != 1 && regno != 2 && regno != 3 &&
+	    regno != 6 && regno != 7)
+		return -1;
+	for (i = 0; i < wt->nthreads; i++) {
+		struct zw_thread *th = &wt->threads[i];
+		if (th->tid == 0 || th->handle == NULL ||
+		    th->state == ZTHREAD_EXITED)
+			continue;
+		if (zw_thread_set_debugreg(th->handle, regno, v) == 0)
+			ok++;
+	}
+	return ok > 0 ? 0 : -1;
+}
+
+#else /* !x86_64 Windows */
 
 int
 ztarget_windows_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
@@ -1321,6 +1548,8 @@ ztarget_windows_set_debugreg_all(struct ztarget *t, int regno, uint64_t v)
 	(void)t; (void)regno; (void)v;
 	return -1;
 }
+
+#endif /* x86_64 Windows */
 
 /* ---------------- threads ---------------- */
 
