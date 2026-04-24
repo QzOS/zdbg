@@ -14,9 +14,14 @@ Windows.
   instruction-cache flush, x64 register get/set via
   `CONTEXT`, continue and single-step (trap flag), basic
   debug-event thread tracking, and software breakpoints via
-  `EXCEPTION_BREAKPOINT` mapping.  Windows symbols, module
-  maps, PE/PDB, hardware breakpoints, watchpoints, WOW64,
-  and Windows exception policy are not implemented yet.
+  `EXCEPTION_BREAKPOINT` mapping.  Windows modules/symbols:
+  `lm` lists loaded PE modules from debug events and
+  `sym`/`b module:symbol` resolve PE export symbols loaded
+  from target memory.  `sym kernel32:CreateFileW` and
+  `b kernel32:CreateFileW` work for exported symbols.
+  PDB/CodeView/private symbols, hardware breakpoints,
+  watchpoints, WOW64, and Windows exception policy are not
+  implemented yet.
 * Breakpoints: software breakpoints (`int3`) support RIP-1
   correction, original-byte restore, single-step rearm, and
   continue from breakpoint for the current single traced Linux
@@ -82,10 +87,17 @@ Windows.
   gone.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 * Windows support is younger than Linux support.  No PDB, no
-  module maps, no PE symbols, no hardware breakpoints or
-  watchpoints, no Windows exception policy, no WOW64, no
-  file-backed `pw` through Windows mappings.  `lm`/`sym`/`bt`
-  and POSIX `sig`/`handle` semantics are Linux-only for now.
+  CodeView, no private/COFF symbols, no hardware breakpoints
+  or watchpoints, no Windows exception policy, no WOW64.
+  Windows `lm` lists module images, not full `VirtualQueryEx`
+  memory regions.  Windows symbols are PE exports only (no
+  imports, no forwarders).  Patch journal works for live
+  memory, but `pw` file persistence is not available on
+  Windows: the synthetic image maps are flagged
+  non-raw-file-offset-valid and `pw` refuses them until
+  real PE RVA-to-file-offset support is implemented.
+  POSIX `sig`/`handle` semantics remain Linux-only; `bt` on
+  Windows relies on frame pointers as on Linux.
 
 On non-Linux hosts every target-dependent command still prints
 

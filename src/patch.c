@@ -200,6 +200,14 @@ zpatch_va_to_file(const struct zmap_table *maps, zaddr_t addr, size_t len,
 		return -1;
 	if (is_deleted_mapping(m->name))
 		return -1;
+	/*
+	 * Only accept maps whose (offset, start, end) have a raw
+	 * on-disk byte correspondence.  Windows synthetic module
+	 * maps are page-permission-less image mappings and would
+	 * otherwise let `pw` compute an RVA as a file offset.
+	 */
+	if (!m->raw_file_offset_valid)
+		return -1;
 
 	if (file != NULL && filecap > 0) {
 		nlen = strlen(m->name);

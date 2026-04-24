@@ -168,6 +168,7 @@ build_maps(struct zmap_table *mt)
 	mt->maps[mt->count].offset = 0x1000;
 	strcpy(mt->maps[mt->count].perms, "r-xp");
 	strcpy(mt->maps[mt->count].name, "/tmp/zdbg_test_prog");
+	mt->maps[mt->count].raw_file_offset_valid = 1;
 	mt->count++;
 
 	/* file-backed adjacent */
@@ -176,6 +177,7 @@ build_maps(struct zmap_table *mt)
 	mt->maps[mt->count].offset = 0x2000;
 	strcpy(mt->maps[mt->count].perms, "r--p");
 	strcpy(mt->maps[mt->count].name, "/tmp/zdbg_test_prog");
+	mt->maps[mt->count].raw_file_offset_valid = 1;
 	mt->count++;
 
 	/* anonymous */
@@ -242,6 +244,38 @@ test_va_to_file(void)
 	if (zpatch_va_to_file(&mt, 0x900000, 4, file, sizeof(file), &off)
 	    == 0)
 		FAILF("unmapped addr should fail");
+}
+
+/*
+ * A Windows-synthetic module map describes the loaded PE image
+ * and has raw_file_offset_valid == 0.  zpatch_va_to_file must
+ * refuse it even though the name looks like a regular file, so
+ * `pw` cannot accidentally patch the disk using an RVA as a
+ * file offset.
+ */
+static void
+test_va_to_file_refuses_synthetic(void)
+{
+	struct zmap_table mt;
+	char file[256];
+	uint64_t off;
+
+	zmaps_init(&mt);
+	mt.count = 0;
+	mt.maps[0].start = 0x7ffb9abc0000ULL;
+	mt.maps[0].end = 0x7ffb9adf0000ULL;
+	mt.maps[0].offset = 0;
+	strcpy(mt.maps[0].perms, "r-xp");
+	strcpy(mt.maps[0].name,
+	    "C:\\Windows\\System32\\KERNEL32.DLL");
+	mt.maps[0].raw_file_offset_valid = 0;
+	mt.count = 1;
+
+	off = 0xdeadbeef;
+	if (zpatch_va_to_file(&mt, 0x7ffb9abc1234ULL, 4, file,
+	    sizeof(file), &off) == 0)
+		FAILF("synthetic (Windows) image map must be refused "
+		    "by zpatch_va_to_file");
 }
 
 static void
@@ -424,6 +458,7 @@ main(void)
 	test_overlap();
 	test_state_transitions();
 	test_va_to_file();
+	test_va_to_file_refuses_synthetic();
 	test_resolve_file();
 	test_file_write_match();
 

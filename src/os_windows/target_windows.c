@@ -39,15 +39,25 @@
 #include <string.h>
 
 #include "zdbg_target.h"
+#include "zdbg_maps.h"
+#include "zdbg_symbols.h"
 
 /* ---------------- private state ---------------- */
 
 #define ZW_MAX_THREADS ZDBG_MAX_THREADS
+#define ZW_MAX_MODULES 256
+#define ZW_MODULE_NAME_MAX 260
 
 struct zw_thread {
 	DWORD tid;
 	HANDLE handle;
 	enum zthread_state state;
+};
+
+struct zw_module {
+	uint64_t base;
+	uint64_t size;
+	char path[ZW_MODULE_NAME_MAX];
 };
 
 struct zw_target {
@@ -66,6 +76,9 @@ struct zw_target {
 	DWORD current_tid;
 	struct zw_thread threads[ZW_MAX_THREADS];
 	int nthreads;		/* high-water slot count */
+
+	struct zw_module modules[ZW_MAX_MODULES];
+	int nmodules;		/* high-water slot count */
 };
 
 static struct zw_target *
@@ -192,6 +205,402 @@ zw_current_handle(struct zw_target *wt)
 	if (th == NULL)
 		return NULL;
 	return th->handle;
+}
+
+/* ---------------- module table helpers ---------------- */
+
+static struct zw_module *
+zw_mod_find(struct zw_target *wt, uint64_t base)
+{
+	int i;
+	for (i = 0; i < wt->nmodules; i++) {
+		if (wt->modules[i].base == base && wt->modules[i].size != 0)
+			return &wt->modules[i];
+	}
+	return NULL;
+}
+
+/*
+ * Resolve the path of a module from its hFile handle.  Uses
+ * GetFinalPathNameByHandleA which is available since Vista.  On
+ * failure leaves out[0] = 0.  `\\?\C:\...` -> `C:\...`.
+ */
+static void
+zw_path_from_handle(HANDLE hFile, char *out, size_t cap)
+{
+	DWORD n;
+
+	if (cap == 0)
+		return;
+	out[0] = 0;
+	if (hFile == NULL || hFile == INVALID_HANDLE_VALUE)
+		return;
+	n = GetFinalPathNameByHandleA(hFile, out, (DWORD)cap, 0);
+	if (n == 0 || n >= cap) {
+		out[0] = 0;
+		return;
+	}
+	/* Strip leading \\?\ or \\?\UNC\. */
+	if (n >= 4 && out[0] == '\\' && out[1] == '\\' &&
+	    out[2] == '?' && out[3] == '\\') {
+		memmove(out, out + 4, (size_t)(n - 4 + 1));
+	}
+}
+
+/*
+ * Read PE headers from target memory at `base` and return
+ * SizeOfImage on success, or 0 if headers look invalid.  64-bit
+ * PE only.  Defensive against partial reads and bad fields.
+ */
+static uint64_t
+zw_read_size_of_image(struct zw_target *wt, uint64_t base)
+{
+	IMAGE_DOS_HEADER dos;
+	IMAGE_NT_HEADERS64 nt;
+	SIZE_T got = 0;
+	LONG e_lfanew;
+
+	if (wt == NULL || wt->process == NULL)
+		return 0;
+	if (!ReadProcessMemory(wt->process, (LPCVOID)(uintptr_t)base,
+	    &dos, sizeof(dos), &got) || got != sizeof(dos))
+		return 0;
+	if (dos.e_magic != IMAGE_DOS_SIGNATURE)
+		return 0;
+	e_lfanew = dos.e_lfanew;
+	if (e_lfanew <= 0 || e_lfanew > 0x100000)
+		return 0;
+	if (!ReadProcessMemory(wt->process,
+	    (LPCVOID)(uintptr_t)(base + (uint64_t)e_lfanew),
+	    &nt, sizeof(nt), &got) || got != sizeof(nt))
+		return 0;
+	if (nt.Signature != IMAGE_NT_SIGNATURE)
+		return 0;
+	if (nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+		return 0;
+	if (nt.OptionalHeader.SizeOfImage == 0)
+		return 0;
+	return (uint64_t)nt.OptionalHeader.SizeOfImage;
+}
+
+/*
+ * Record a module load.  base must be nonzero.  hFile may be
+ * NULL.  If PE size cannot be determined, fall back to one page
+ * so `lm` still shows the base; better to see something than
+ * nothing.  Caller is responsible for closing hFile.
+ */
+static void
+zw_module_add(struct zw_target *wt, uint64_t base, HANDLE hFile)
+{
+	struct zw_module *mod;
+	uint64_t size;
+	int i;
+
+	if (wt == NULL || base == 0)
+		return;
+
+	/* Replace existing slot with same base, else pick free slot. */
+	mod = zw_mod_find(wt, base);
+	if (mod == NULL) {
+		for (i = 0; i < wt->nmodules; i++) {
+			if (wt->modules[i].size == 0 &&
+			    wt->modules[i].base == 0) {
+				mod = &wt->modules[i];
+				break;
+			}
+		}
+	}
+	if (mod == NULL) {
+		if (wt->nmodules >= ZW_MAX_MODULES)
+			return;
+		mod = &wt->modules[wt->nmodules++];
+	}
+	memset(mod, 0, sizeof(*mod));
+	mod->base = base;
+
+	size = zw_read_size_of_image(wt, base);
+	if (size == 0)
+		size = 0x1000;	/* best-effort placeholder */
+	mod->size = size;
+
+	zw_path_from_handle(hFile, mod->path, sizeof(mod->path));
+	if (mod->path[0] == 0) {
+		/* Synthetic fallback name so lm/sym show something. */
+		snprintf(mod->path, sizeof(mod->path),
+		    "module@%016llx", (unsigned long long)base);
+	}
+}
+
+static void
+zw_module_remove(struct zw_target *wt, uint64_t base)
+{
+	struct zw_module *mod;
+
+	if (wt == NULL)
+		return;
+	mod = zw_mod_find(wt, base);
+	if (mod == NULL)
+		return;
+	memset(mod, 0, sizeof(*mod));
+}
+
+/* ---------------- PE export parsing (from target memory) -------- */
+
+#define ZW_PE_MAX_EXPORTS 65536
+#define ZW_PE_MAX_NAMELEN 512
+
+/*
+ * Read a NUL-terminated ASCII string of up to `cap-1` bytes from
+ * target memory.  Returns bytes copied (excluding NUL) or -1 on
+ * failure.  Reads in chunks to avoid reading past image bounds.
+ */
+static int
+zw_read_cstr(struct zw_target *wt, uint64_t addr, char *out, size_t cap)
+{
+	size_t n = 0;
+
+	if (cap == 0)
+		return -1;
+	out[0] = 0;
+	while (n + 1 < cap) {
+		SIZE_T got = 0;
+		size_t chunk = 64;
+		char tmp[64];
+		size_t i;
+
+		if (chunk > cap - 1 - n)
+			chunk = cap - 1 - n;
+		if (!ReadProcessMemory(wt->process,
+		    (LPCVOID)(uintptr_t)(addr + (uint64_t)n),
+		    tmp, chunk, &got) || got == 0)
+			return -1;
+		for (i = 0; i < got; i++) {
+			if (tmp[i] == 0) {
+				out[n] = 0;
+				return (int)n;
+			}
+			out[n++] = tmp[i];
+			if (n + 1 >= cap) {
+				out[n] = 0;
+				return (int)n;
+			}
+		}
+	}
+	out[n] = 0;
+	return (int)n;
+}
+
+/*
+ * Load PE exports for module `mod` into st.  Skips ordinal-only
+ * and forwarded exports.  Defensive against corrupt headers.
+ */
+static void
+zw_load_exports(struct zw_target *wt, const struct zw_module *mod,
+    struct zsym_table *st)
+{
+	IMAGE_DOS_HEADER dos;
+	IMAGE_NT_HEADERS64 nt;
+	IMAGE_DATA_DIRECTORY dir;
+	IMAGE_EXPORT_DIRECTORY ex;
+	SIZE_T got = 0;
+	uint64_t base;
+	uint64_t dir_start;
+	uint64_t dir_end;
+	DWORD nnames;
+	DWORD i;
+	DWORD *name_rvas = NULL;
+	WORD *name_ords = NULL;
+	DWORD *func_rvas = NULL;
+	DWORD nfuncs;
+
+	if (wt == NULL || mod == NULL || st == NULL)
+		return;
+	if (wt->process == NULL)
+		return;
+	base = mod->base;
+
+	if (!ReadProcessMemory(wt->process, (LPCVOID)(uintptr_t)base,
+	    &dos, sizeof(dos), &got) || got != sizeof(dos))
+		return;
+	if (dos.e_magic != IMAGE_DOS_SIGNATURE)
+		return;
+	if (dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000)
+		return;
+	if (!ReadProcessMemory(wt->process,
+	    (LPCVOID)(uintptr_t)(base + (uint64_t)dos.e_lfanew),
+	    &nt, sizeof(nt), &got) || got != sizeof(nt))
+		return;
+	if (nt.Signature != IMAGE_NT_SIGNATURE)
+		return;
+	if (nt.OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+		return;
+	if (IMAGE_DIRECTORY_ENTRY_EXPORT >=
+	    nt.OptionalHeader.NumberOfRvaAndSizes)
+		return;
+	dir = nt.OptionalHeader.DataDirectory[
+	    IMAGE_DIRECTORY_ENTRY_EXPORT];
+	if (dir.VirtualAddress == 0 || dir.Size < sizeof(ex))
+		return;
+	dir_start = base + (uint64_t)dir.VirtualAddress;
+	dir_end = dir_start + (uint64_t)dir.Size;
+	if (!ReadProcessMemory(wt->process,
+	    (LPCVOID)(uintptr_t)dir_start,
+	    &ex, sizeof(ex), &got) || got != sizeof(ex))
+		return;
+
+	nnames = ex.NumberOfNames;
+	nfuncs = ex.NumberOfFunctions;
+	if (nnames == 0 || nnames > ZW_PE_MAX_EXPORTS)
+		return;
+	if (nfuncs == 0 || nfuncs > ZW_PE_MAX_EXPORTS)
+		return;
+	if (ex.AddressOfNames == 0 || ex.AddressOfNameOrdinals == 0 ||
+	    ex.AddressOfFunctions == 0)
+		return;
+
+	name_rvas = (DWORD *)malloc(sizeof(DWORD) * (size_t)nnames);
+	name_ords = (WORD *)malloc(sizeof(WORD) * (size_t)nnames);
+	func_rvas = (DWORD *)malloc(sizeof(DWORD) * (size_t)nfuncs);
+	if (name_rvas == NULL || name_ords == NULL || func_rvas == NULL)
+		goto done;
+
+	if (!ReadProcessMemory(wt->process,
+	    (LPCVOID)(uintptr_t)(base + (uint64_t)ex.AddressOfNames),
+	    name_rvas, sizeof(DWORD) * (size_t)nnames, &got) ||
+	    got != sizeof(DWORD) * (size_t)nnames)
+		goto done;
+	if (!ReadProcessMemory(wt->process,
+	    (LPCVOID)(uintptr_t)(base +
+	    (uint64_t)ex.AddressOfNameOrdinals),
+	    name_ords, sizeof(WORD) * (size_t)nnames, &got) ||
+	    got != sizeof(WORD) * (size_t)nnames)
+		goto done;
+	if (!ReadProcessMemory(wt->process,
+	    (LPCVOID)(uintptr_t)(base + (uint64_t)ex.AddressOfFunctions),
+	    func_rvas, sizeof(DWORD) * (size_t)nfuncs, &got) ||
+	    got != sizeof(DWORD) * (size_t)nfuncs)
+		goto done;
+
+	for (i = 0; i < nnames; i++) {
+		WORD ord;
+		DWORD frva;
+		char name[ZW_PE_MAX_NAMELEN];
+		zaddr_t fn_addr;
+		struct zsym *out;
+		size_t nl;
+
+		if (st->count >= ZDBG_MAX_SYMBOLS) {
+			st->truncated = 1;
+			break;
+		}
+		ord = name_ords[i];
+		if ((DWORD)ord >= nfuncs)
+			continue;
+		frva = func_rvas[ord];
+		if (frva == 0)
+			continue;
+		/* Forwarded exports: function RVA points inside the
+		 * export directory and is actually a string like
+		 * "KERNELBASE.CreateFileW".  Skip them. */
+		{
+			uint64_t fva = base + (uint64_t)frva;
+			if (fva >= dir_start && fva < dir_end)
+				continue;
+		}
+		if (name_rvas[i] == 0)
+			continue;
+		if (zw_read_cstr(wt,
+		    base + (uint64_t)name_rvas[i], name,
+		    sizeof(name)) <= 0)
+			continue;
+
+		fn_addr = (zaddr_t)(base + (uint64_t)frva);
+
+		out = &st->syms[st->count];
+		memset(out, 0, sizeof(*out));
+		out->addr = fn_addr;
+		out->size = 0;
+		out->type = 'T';
+		out->bind = 'G';
+		nl = strlen(name);
+		if (nl >= ZDBG_SYM_NAME_MAX)
+			nl = ZDBG_SYM_NAME_MAX - 1;
+		memcpy(out->name, name, nl);
+		out->name[nl] = 0;
+		nl = strlen(mod->path);
+		if (nl >= ZDBG_SYM_MODULE_MAX)
+			nl = ZDBG_SYM_MODULE_MAX - 1;
+		memcpy(out->module, mod->path, nl);
+		out->module[nl] = 0;
+		st->count++;
+	}
+
+done:
+	if (name_rvas) free(name_rvas);
+	if (name_ords) free(name_ords);
+	if (func_rvas) free(func_rvas);
+}
+
+/* ---------------- public fill helpers ---------------- */
+
+int
+ztarget_windows_fill_maps(struct ztarget *t, struct zmap_table *mt)
+{
+	struct zw_target *wt = zw_get(t);
+	int i;
+
+	if (wt == NULL || mt == NULL)
+		return -1;
+	mt->count = 0;
+	mt->truncated = 0;
+	for (i = 0; i < wt->nmodules; i++) {
+		const struct zw_module *mod = &wt->modules[i];
+		struct zmap *m;
+		size_t nlen;
+
+		if (mod->base == 0 || mod->size == 0)
+			continue;
+		if (mt->count >= ZDBG_MAX_MAPS) {
+			mt->truncated = 1;
+			break;
+		}
+		m = &mt->maps[mt->count++];
+		memset(m, 0, sizeof(*m));
+		m->start = (zaddr_t)mod->base;
+		m->end = (zaddr_t)(mod->base + mod->size);
+		m->offset = 0;
+		memcpy(m->perms, "r-xp", 5);
+		nlen = strlen(mod->path);
+		if (nlen >= ZDBG_MAP_NAME_MAX)
+			nlen = ZDBG_MAP_NAME_MAX - 1;
+		memcpy(m->name, mod->path, nlen);
+		m->name[nlen] = 0;
+		m->raw_file_offset_valid = 0;
+	}
+	return 0;
+}
+
+int
+ztarget_windows_fill_syms(struct ztarget *t, struct zsym_table *st)
+{
+	struct zw_target *wt = zw_get(t);
+	int i;
+	int scanned = 0;
+
+	if (wt == NULL || st == NULL)
+		return -1;
+	for (i = 0; i < wt->nmodules; i++) {
+		const struct zw_module *mod = &wt->modules[i];
+		if (mod->base == 0 || mod->size == 0)
+			continue;
+		zw_load_exports(wt, mod, st);
+		scanned++;
+		if (st->count >= ZDBG_MAX_SYMBOLS) {
+			st->truncated = 1;
+			break;
+		}
+	}
+	return scanned;
 }
 
 /* ---------------- command-line quoting ---------------- */
@@ -368,6 +777,11 @@ zw_handle_event(struct zw_target *wt, struct zstop *st)
 			wt->process = ci->hProcess;
 		if (ci->hThread != NULL)
 			(void)zw_add(wt, ev->dwThreadId, ci->hThread);
+		if (ci->lpBaseOfImage != NULL) {
+			zw_module_add(wt,
+			    (uint64_t)(uintptr_t)ci->lpBaseOfImage,
+			    ci->hFile);
+		}
 		if (ci->hFile != NULL)
 			CloseHandle(ci->hFile);
 		wt->continue_status = DBG_CONTINUE;
@@ -393,11 +807,22 @@ zw_handle_event(struct zw_target *wt, struct zstop *st)
 		wt->continue_status = DBG_CONTINUE;
 		return 1;
 	case LOAD_DLL_DEBUG_EVENT:
+		if (ev->u.LoadDll.lpBaseOfDll != NULL) {
+			zw_module_add(wt,
+			    (uint64_t)(uintptr_t)
+			    ev->u.LoadDll.lpBaseOfDll,
+			    ev->u.LoadDll.hFile);
+		}
 		if (ev->u.LoadDll.hFile != NULL)
 			CloseHandle(ev->u.LoadDll.hFile);
 		wt->continue_status = DBG_CONTINUE;
 		return 0;
 	case UNLOAD_DLL_DEBUG_EVENT:
+		if (ev->u.UnloadDll.lpBaseOfDll != NULL) {
+			zw_module_remove(wt,
+			    (uint64_t)(uintptr_t)
+			    ev->u.UnloadDll.lpBaseOfDll);
+		}
 		wt->continue_status = DBG_CONTINUE;
 		return 0;
 	case OUTPUT_DEBUG_STRING_EVENT:

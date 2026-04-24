@@ -128,6 +128,92 @@ test_find_by_addr(void)
 		FAILF("find oob should fail");
 }
 
+/*
+ * Windows image paths use backslash separators.  The basename
+ * extraction inside zmaps_find_module() must handle them so
+ * lookups like `KERNEL32.DLL` or `kernel32` match
+ * `C:\Windows\System32\KERNEL32.DLL`.
+ */
+static void
+test_find_module_backslash(void)
+{
+	struct zmap_table mt;
+	const struct zmap *m;
+	int amb;
+
+	zmaps_init(&mt);
+	mt.maps[0].start = 0x7ff612340000ULL;
+	mt.maps[0].end = 0x7ff612360000ULL;
+	mt.maps[0].offset = 0;
+	strcpy(mt.maps[0].perms, "r-xp");
+	strcpy(mt.maps[0].name,
+	    "C:\\Windows\\System32\\KERNEL32.DLL");
+	mt.count = 1;
+
+	amb = 0;
+	m = zmaps_find_module(&mt, "KERNEL32.DLL", &amb);
+	if (m != &mt.maps[0])
+		FAILF("KERNEL32.DLL basename should match backslash path");
+
+#if defined(_WIN32)
+	amb = 0;
+	m = zmaps_find_module(&mt, "kernel32.dll", &amb);
+	if (m != &mt.maps[0])
+		FAILF("case-insensitive match expected on Windows");
+
+	amb = 0;
+	m = zmaps_find_module(&mt, "kernel32", &amb);
+	if (m != &mt.maps[0])
+		FAILF("prefix match 'kernel32' should hit KERNEL32.DLL "
+		    "on Windows");
+#endif
+}
+
+/*
+ * zmaps_parse_line sets raw_file_offset_valid=1 for named
+ * non-bracketed / non-deleted entries and leaves it 0 for
+ * anonymous, bracketed and " (deleted)" entries.  This is the
+ * gate used by zpatch_va_to_file.
+ */
+static void
+test_parse_raw_file_offset_valid(void)
+{
+	struct zmap m;
+
+	if (zmaps_parse_line(
+	    "400000-401000 r-xp 00000000 08:02 1 /bin/ls\n", &m) != 0) {
+		FAILF("parse file-backed");
+		return;
+	}
+	if (!m.raw_file_offset_valid)
+		FAILF("file-backed map should be raw_file_offset_valid");
+
+	if (zmaps_parse_line(
+	    "500000-501000 rw-p 00000000 00:00 0\n", &m) != 0) {
+		FAILF("parse anon");
+		return;
+	}
+	if (m.raw_file_offset_valid)
+		FAILF("anonymous map must not be raw_file_offset_valid");
+
+	if (zmaps_parse_line(
+	    "600000-601000 rw-p 00000000 00:00 0 [heap]\n", &m) != 0) {
+		FAILF("parse bracketed");
+		return;
+	}
+	if (m.raw_file_offset_valid)
+		FAILF("bracketed map must not be raw_file_offset_valid");
+
+	if (zmaps_parse_line(
+	    "700000-701000 r-xp 00000100 08:02 42 "
+	    "/tmp/old (deleted)\n", &m) != 0) {
+		FAILF("parse deleted");
+		return;
+	}
+	if (m.raw_file_offset_valid)
+		FAILF("deleted-file map must not be raw_file_offset_valid");
+}
+
 int
 main(void)
 {
@@ -137,6 +223,8 @@ main(void)
 	test_parse_bracketed();
 	test_parse_bad();
 	test_find_by_addr();
+	test_find_module_backslash();
+	test_parse_raw_file_offset_valid();
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);

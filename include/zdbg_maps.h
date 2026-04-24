@@ -25,6 +25,17 @@ struct zmap {
 	zaddr_t offset;
 	char perms[5];
 	char name[ZDBG_MAP_NAME_MAX];
+	/*
+	 * Nonzero when (start, end, offset) describe a real file
+	 * mapping such that `file_offset = m->offset + (addr -
+	 * m->start)` is the raw on-disk byte offset in `name`.
+	 * Linux /proc/<pid>/maps entries set this.  Windows
+	 * synthetic module maps cover the PE image and are *not*
+	 * raw-file-offset valid: PE sections are mapped with gaps
+	 * and alignment fixups, so this flag stays 0 and `pw`
+	 * rejects them for now.
+	 */
+	int raw_file_offset_valid;
 };
 
 struct zmap_table {

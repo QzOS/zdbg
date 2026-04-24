@@ -23,7 +23,7 @@ basename_of(const char *path)
 	if (path == NULL)
 		return "";
 	for (p = path; *p; p++)
-		if (*p == '/')
+		if (*p == '/' || *p == '\\')
 			last = p + 1;
 	return last;
 }
@@ -160,6 +160,51 @@ zsyms_find_exact(const struct zsym_table *st, const char *name,
  * zmaps_find_module(): prefer an exact pathname/basename match,
  * accept a prefix match ("libc" matching "libc.so.6").
  */
+/*
+ * Case-insensitive name comparison on Windows, case-sensitive
+ * elsewhere.  Module names on Windows are case-insensitive
+ * (KERNEL32.DLL == kernel32.dll).
+ */
+static int
+name_eq(const char *a, const char *b)
+{
+#if defined(_WIN32)
+	while (*a && *b) {
+		int ca = (unsigned char)*a;
+		int cb = (unsigned char)*b;
+		if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+		if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+		if (ca != cb)
+			return 0;
+		a++; b++;
+	}
+	return *a == 0 && *b == 0;
+#else
+	return strcmp(a, b) == 0;
+#endif
+}
+
+static int
+name_neq(const char *a, const char *b, size_t n)
+{
+#if defined(_WIN32)
+	size_t i;
+	for (i = 0; i < n; i++) {
+		int ca = (unsigned char)a[i];
+		int cb = (unsigned char)b[i];
+		if (ca >= 'A' && ca <= 'Z') ca += 'a' - 'A';
+		if (cb >= 'A' && cb <= 'Z') cb += 'a' - 'A';
+		if (ca != cb)
+			return 1;
+		if (ca == 0)
+			return 0;
+	}
+	return 0;
+#else
+	return strncmp(a, b, n) != 0;
+#endif
+}
+
 static int
 module_matches(const char *sym_module, const char *query)
 {
@@ -168,13 +213,13 @@ module_matches(const char *sym_module, const char *query)
 
 	if (sym_module == NULL || query == NULL || *query == 0)
 		return 0;
-	if (strcmp(sym_module, query) == 0)
+	if (name_eq(sym_module, query))
 		return 1;
 	b = basename_of(sym_module);
-	if (strcmp(b, query) == 0)
+	if (name_eq(b, query))
 		return 1;
 	qn = strlen(query);
-	if (qn == 0 || strncmp(b, query, qn) != 0)
+	if (qn == 0 || name_neq(b, query, qn))
 		return 0;
 	{
 		char sep = b[qn];
@@ -216,7 +261,7 @@ zsyms_find_qualified(const struct zsym_table *st,
 		if (strcmp(s->name, name) != 0)
 			continue;
 		if (mm != NULL)
-			match = (strcmp(s->module, mm->name) == 0);
+			match = name_eq(s->module, mm->name);
 		else
 			match = module_matches(s->module, module);
 		if (!match)
@@ -426,7 +471,18 @@ zsyms_format_addr(const struct zsym_table *st, zaddr_t addr,
 	return n;
 }
 
-#if !defined(__linux__)
+#if defined(_WIN32)
+int
+zsyms_refresh(struct ztarget *t, const struct zmap_table *maps,
+    struct zsym_table *st)
+{
+	(void)maps;
+	if (st == NULL)
+		return -1;
+	zsyms_clear(st);
+	return ztarget_windows_fill_syms(t, st);
+}
+#elif !defined(__linux__)
 int
 zsyms_refresh(struct ztarget *t, const struct zmap_table *maps,
     struct zsym_table *st)
