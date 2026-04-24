@@ -344,6 +344,25 @@ refresh_maps(struct zdbg *d)
 }
 
 /*
+ * Refresh the full memory-region view (Windows VirtualQueryEx
+ * or Linux /proc/<pid>/maps).  Best effort; on hosts without a
+ * region scanner this leaves d->have_regions = 0.
+ */
+static void
+refresh_regions(struct zdbg *d)
+{
+	if (!have_target(d)) {
+		d->have_regions = 0;
+		d->regions.count = 0;
+		return;
+	}
+	if (zmaps_refresh_regions(&d->target, &d->regions) == 0)
+		d->have_regions = 1;
+	else
+		d->have_regions = 0;
+}
+
+/*
  * Forget the cached memory map.  Used on detach/kill/new launch.
  */
 static void
@@ -353,6 +372,10 @@ clear_maps(struct zdbg *d)
 	d->maps.count = 0;
 	d->maps.truncated = 0;
 	d->maps.main_hint[0] = 0;
+	d->have_regions = 0;
+	d->regions.count = 0;
+	d->regions.truncated = 0;
+	d->regions.main_hint[0] = 0;
 }
 
 /*
@@ -1815,36 +1838,78 @@ selected:
 }
 
 /* --- lm -------------------------------------------------------- */
+
+/*
+ * `lm` shows full memory regions when available (Windows
+ * VirtualQueryEx, Linux /proc/<pid>/maps), and falls back to
+ * the module table.  Flags:
+ *   -m   modules only (Windows debug-event modules; on Linux
+ *        the same /proc table is shown)
+ *   -r   memory regions only
+ * An optional trailing address restricts output to the entry
+ * containing that address.
+ */
 static int
 cmd_lm(struct zdbg *d, struct toks *t)
 {
 	zaddr_t addr;
 	const struct zmap *m;
+	const struct zmap_table *mt;
+	int want_modules = 0;
+	int want_regions = 0;
+	int argi = 1;
 
 	if (!have_target(d)) {
 		printf("no target\n");
 		return -1;
 	}
+	if (t->n >= 2 && strcmp(t->v[1], "-m") == 0) {
+		want_modules = 1;
+		argi = 2;
+	} else if (t->n >= 2 && strcmp(t->v[1], "-r") == 0) {
+		want_regions = 1;
+		argi = 2;
+	}
+
 	refresh_maps(d);
 	refresh_syms(d);
-	if (!d->have_maps) {
+	if (!want_modules)
+		refresh_regions(d);
+
+	/* Pick the table to display. */
+	if (want_modules) {
+		mt = d->have_maps ? &d->maps : NULL;
+	} else if (want_regions) {
+		mt = d->have_regions ? &d->regions : NULL;
+	} else {
+		/* Default: prefer regions, fall back to modules. */
+		if (d->have_regions && d->regions.count > 0)
+			mt = &d->regions;
+		else if (d->have_maps)
+			mt = &d->maps;
+		else
+			mt = NULL;
+	}
+
+	if (mt == NULL) {
 		printf("could not read process maps\n");
 		return -1;
 	}
-	if (t->n < 2) {
-		zmaps_print(&d->maps);
+
+	if (t->n <= argi) {
+		zmaps_print(mt);
 		return 0;
 	}
-	if (eval_addr(d, t->v[1], &addr) < 0) {
+	if (eval_addr(d, t->v[argi], &addr) < 0) {
 		printf("bad address\n");
 		return -1;
 	}
-	m = zmaps_find_by_addr(&d->maps, addr);
+	m = zmaps_find_by_addr(mt, addr);
 	if (m == NULL) {
 		printf("%016llx: no mapping\n", (unsigned long long)addr);
 		return -1;
 	}
-	zmaps_print_one((int)(m - d->maps.maps), m);
+	zmaps_print_one((int)(m - mt->maps), m);
 	return 0;
 }
 
@@ -1896,6 +1961,7 @@ cmd_addr(struct zdbg *d, struct toks *t)
 	zaddr_t addr;
 	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
 	const struct zmap *m = NULL;
+	const struct zmap *r = NULL;
 
 	if (t->n < 2) {
 		printf("usage: addr expr\n");
@@ -1908,11 +1974,27 @@ cmd_addr(struct zdbg *d, struct toks *t)
 	annot_addr(d, addr, ann, sizeof(ann));
 	if (have_target(d) && !d->have_maps)
 		refresh_maps(d);
+	if (have_target(d) && !d->have_regions)
+		refresh_regions(d);
 	if (d->have_maps)
 		m = zmaps_find_by_addr(&d->maps, addr);
-	printf("%016llx%s%s%s\n", (unsigned long long)addr, ann,
+	if (d->have_regions)
+		r = zmaps_find_by_addr(&d->regions, addr);
+	printf("%016llx%s%s%s",
+	    (unsigned long long)addr, ann,
 	    m != NULL ? " " : "",
 	    m != NULL ? m->name : "");
+	if (r != NULL) {
+		/*
+		 * Show region perms/type.  When the module name from
+		 * `maps` already covers this address, avoid repeating
+		 * the same path; print only the perm/type block.
+		 */
+		if (m == NULL || strcmp(m->name, r->name) != 0)
+			printf(" %s", r->name);
+		printf(" %s %s", r->perms, zmaps_mem_type_str(r->mem_type));
+	}
+	printf("\n");
 	return 0;
 }
 
@@ -2993,6 +3075,7 @@ zdbg_init(struct zdbg *d)
 	zhwbp_table_init(&d->hwbps);
 	zregs_clear(&d->regs);
 	zmaps_init(&d->maps);
+	zmaps_init(&d->regions);
 	zsyms_init(&d->syms);
 	zsig_table_init(&d->sigs);
 	zexc_table_init(&d->excs);
@@ -3001,6 +3084,7 @@ zdbg_init(struct zdbg *d)
 	d->asm_addr = 0;
 	d->have_regs = 0;
 	d->have_maps = 0;
+	d->have_regions = 0;
 	d->have_syms = 0;
 	d->stopped_bp = -1;
 	d->stopped_hwbp = -1;

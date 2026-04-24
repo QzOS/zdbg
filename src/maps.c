@@ -207,6 +207,13 @@ zmaps_parse_line(const char *line, struct zmap *m)
 	m->start = start;
 	m->end = end;
 	m->offset = off;
+	/* /proc maps describe the page/region view of the address
+	 * space.  Treat as REGION; the file/anon distinction below
+	 * decides raw_file_offset_valid. */
+	m->kind = ZMAP_KIND_REGION;
+	m->mem_type = ZMAP_MEM_UNKNOWN;
+	m->protect = 0;
+	m->state = 0;
 
 	/*
 	 * Linux /proc/<pid>/maps lines describe file-backed pages
@@ -234,11 +241,12 @@ zmaps_print_one(int idx, const struct zmap *m)
 {
 	if (m == NULL)
 		return;
-	printf("%3d %016llx-%016llx %4s off=%08llx %s\n",
+	printf("%3d %016llx-%016llx %4s %s off=%08llx %s\n",
 	    idx,
 	    (unsigned long long)m->start,
 	    (unsigned long long)m->end,
 	    m->perms,
+	    zmaps_mem_type_str(m->mem_type),
 	    (unsigned long long)m->offset,
 	    m->name);
 }
@@ -253,7 +261,24 @@ zmaps_print(const struct zmap_table *mt)
 	for (i = 0; i < mt->count; i++)
 		zmaps_print_one(i, &mt->maps[i]);
 	if (mt->truncated)
-		printf("(truncated at %d maps)\n", ZDBG_MAX_MAPS);
+		printf("(map table truncated at %d entries)\n",
+		    ZDBG_MAX_MAPS);
+}
+
+const char *
+zmaps_mem_type_str(enum zmap_mem_type mt)
+{
+	switch (mt) {
+	case ZMAP_MEM_IMAGE:
+		return "IMG";
+	case ZMAP_MEM_MAPPED:
+		return "MAP";
+	case ZMAP_MEM_PRIVATE:
+		return "PRI";
+	case ZMAP_MEM_UNKNOWN:
+	default:
+		return "---";
+	}
 }
 
 const struct zmap *
@@ -513,9 +538,28 @@ zmaps_refresh(struct ztarget *t, struct zmap_table *mt)
 	mt->truncated = 0;
 	return ztarget_windows_fill_maps(t, mt);
 }
+
+int
+zmaps_refresh_regions(struct ztarget *t, struct zmap_table *mt)
+{
+	if (mt == NULL)
+		return -1;
+	mt->count = 0;
+	mt->truncated = 0;
+	return ztarget_windows_fill_regions(t, mt);
+}
 #elif !defined(__linux__)
 int
 zmaps_refresh(struct ztarget *t, struct zmap_table *mt)
+{
+	(void)t;
+	if (mt != NULL)
+		mt->count = 0;
+	return -1;
+}
+
+int
+zmaps_refresh_regions(struct ztarget *t, struct zmap_table *mt)
 {
 	(void)t;
 	if (mt != NULL)

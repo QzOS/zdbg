@@ -29,8 +29,10 @@ Windows.
 * Tiny disassembler: recognizes a small useful x86-64 subset for
   prologues, calls, jumps, stack adjustment, simple moves/tests/
   comparisons.  Unknown instructions are still shown as `db`.
-* Linux memory maps: `lm` lists `/proc/<pid>/maps` and address
-  expressions support `module+offset` for mapped modules.
+* Memory maps: on Linux, `lm` lists `/proc/<pid>/maps`; on
+  Windows, `lm` lists `VirtualQueryEx` committed regions with
+  protection/type, and `lm -m` lists the PE module table used
+  for `module+offset` expressions and PE export symbols.
   Module-relative expressions are *mapping-relative*, not ELF
   symbol/RVA aware yet.
 * Linux ELF symbols: `sym` reads ELF64 `.symtab`/`.dynsym` from
@@ -110,8 +112,16 @@ Windows.
   `handle` stop/pass/print policy for Windows exceptions.
   Windows hardware watchpoints rely on
   known debug-event threads and are not yet a fully non-stop
-  multi-thread solution.  Windows `lm` lists module images,
-  not full `VirtualQueryEx` memory regions.  Windows symbols
+  multi-thread solution.  Windows `lm` shows full
+  `VirtualQueryEx` committed memory regions with protection and
+  type information; `lm -m` shows the loaded PE module table
+  used for `module+offset` expressions and PE export symbols,
+  while `lm -r` shows the region view explicitly.  Windows `lm`
+  is not a full VAD/heap/stack analyzer: private regions are
+  shown generically (`[private]`/`[private guard]`/`[mapped]`)
+  and zdbg does not identify individual heaps or stacks.
+  VirtualQueryEx regions are not treated as raw file-backed
+  patch targets.  Windows symbols
   are PE exports only (no imports, no forwarders).  Windows
   patch persistence: zdbg can persist in-place patches to PE
   files when the patched RVA maps entirely to raw bytes in one
@@ -198,7 +208,7 @@ Run the debugger:
     hc n|*               clear hardware breakpoint/watchpoint
     hd n                 disable hardware slot
     he n                 enable hardware slot
-    lm [addr]            list maps or show map containing address
+    lm [-m|-r] [addr]    list maps/regions or show containing entry
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
     addr expr            show address, nearest symbol, containing map
     bt [count]           frame-pointer backtrace (default 16 frames)
