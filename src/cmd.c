@@ -118,6 +118,11 @@ print_help(void)
 	    "  x [addr [len]]       alias for d\n"
 	    "  e addr bytes...      write bytes\n"
 	    "  f addr len bytes...  fill memory\n"
+	    "  s addr len bytes...  search explicit range for bytes\n"
+	    "  s -a|-r pattern      search all readable regions\n"
+	    "  s -m module pattern  search one module range\n"
+	    "  s -str|-wstr|-u32|-u64|-ptr ...\n"
+	    "                       string/integer/pointer pattern forms\n"
 	    "  u [addr [count]]     tiny unassemble\n"
 	    "  a [addr]             interactive tiny assemble\n"
 	    "  pa addr len insn     patch instruction + NOP fill\n"
@@ -652,6 +657,517 @@ cmd_f(struct zdbg *d, struct toks *t)
 	for (i = 0; i < len; i++)
 		buf[i] = pat[i % patlen];
 	return zdbg_patch_write(d, addr, buf, (size_t)len, "f");
+}
+
+/* --- s --------------------------------------------------------- */
+
+/*
+ * Quote-aware re-tokenizer for the `s` command.  The default
+ * tokenizer splits on whitespace which would break
+ * `s -str "hello world"`, so the search command does its own
+ * pass over t->orig.  Honors:
+ *   - whitespace separators
+ *   - "double-quoted" segments (kept as a single argument with
+ *     quotes stripped); inside quotes a backslash escapes the
+ *     next character literally so escape sequences like \" and
+ *     \\ survive into the pattern builder, which interprets
+ *     them itself.
+ */
+#define ZDBG_S_MAX_ARGS 32
+#define ZDBG_S_BUF_SIZE 512
+
+struct s_args {
+	char buf[ZDBG_S_BUF_SIZE];
+	char *v[ZDBG_S_MAX_ARGS];
+	int n;
+};
+
+static int
+s_argparse(const char *line, struct s_args *a)
+{
+	char *out;
+	const char *p;
+	size_t cap;
+	size_t used = 0;
+	int c;
+
+	a->n = 0;
+	out = a->buf;
+	cap = sizeof(a->buf);
+	p = line;
+
+	for (;;) {
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == 0)
+			break;
+		if (a->n >= ZDBG_S_MAX_ARGS)
+			return -1;
+		a->v[a->n++] = out;
+		while (*p && *p != ' ' && *p != '\t') {
+			if (*p == '"') {
+				p++;
+				while (*p && *p != '"') {
+					c = *p++;
+					if (c == '\\' && *p) {
+						/* Preserve the backslash and the next
+						 * character literally so pattern builder
+						 * can interpret escapes. */
+						if (used + 1 >= cap)
+							return -1;
+						*out++ = (char)c;
+						used++;
+						c = *p++;
+					}
+					if (used + 1 >= cap)
+						return -1;
+					*out++ = (char)c;
+					used++;
+				}
+				if (*p == '"')
+					p++;
+			} else {
+				if (used + 1 >= cap)
+					return -1;
+				*out++ = *p++;
+				used++;
+			}
+		}
+		if (used + 1 >= cap)
+			return -1;
+		*out++ = 0;
+		used++;
+	}
+	return 0;
+}
+
+struct s_match_ctx {
+	struct zdbg *d;
+	int count;
+	int limit;
+	int verbose;
+};
+
+static void
+s_print_match(struct zdbg *d, zaddr_t addr)
+{
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	const struct zmap *r = NULL;
+	const struct zmap *m = NULL;
+	const char *perms = "----";
+	const char *mtype = "---";
+	const char *region_name = NULL;
+
+	annot_addr(d, addr, ann, sizeof(ann));
+	if (d->have_regions)
+		r = zmaps_find_by_addr(&d->regions, addr);
+	if (d->have_maps)
+		m = zmaps_find_by_addr(&d->maps, addr);
+	if (r != NULL) {
+		perms = r->perms;
+		mtype = zmaps_mem_type_str(r->mem_type);
+		region_name = r->name;
+	} else if (m != NULL) {
+		perms = m->perms;
+		region_name = m->name;
+	}
+	printf("%016llx%s%s%s %s %s\n",
+	    (unsigned long long)addr, ann,
+	    region_name != NULL ? " " : "",
+	    region_name != NULL ? region_name : "",
+	    perms, mtype);
+}
+
+static int
+s_match_cb(zaddr_t addr, void *arg)
+{
+	struct s_match_ctx *ctx = (struct s_match_ctx *)arg;
+
+	s_print_match(ctx->d, addr);
+	ctx->count++;
+	if (ctx->limit > 0 && ctx->count >= ctx->limit) {
+		printf("(result limit %d reached)\n", ctx->limit);
+		return 1;
+	}
+	return 0;
+}
+
+/*
+ * Search [start, end) of target memory for `pat` in chunks,
+ * keeping `patlen-1` bytes of overlap so matches that straddle
+ * a chunk boundary are still found.  When skip_failures is
+ * non-zero a failed read advances past the failed window
+ * instead of aborting; this is what region scans want.
+ *
+ * Returns 1 if the result-limit callback stopped the scan,
+ * 0 on normal completion of this range, -1 on an unrecoverable
+ * read error when skip_failures was 0.
+ */
+static int
+s_search_range(struct zdbg *d, zaddr_t start, zaddr_t end,
+    const uint8_t *pat, size_t patlen, struct s_match_ctx *ctx,
+    int skip_failures)
+{
+	uint8_t buf[ZDBG_SEARCH_CHUNK];
+	zaddr_t cur = start;
+
+	if (patlen == 0 || patlen > sizeof(buf))
+		return -1;
+	if (end <= start)
+		return 0;
+
+	while (cur < end) {
+		uint64_t remaining = (uint64_t)(end - cur);
+		size_t want = sizeof(buf);
+		int r;
+
+		if ((uint64_t)want > remaining)
+			want = (size_t)remaining;
+		if (ztarget_read(&d->target, cur, buf, want) < 0) {
+			if (!skip_failures)
+				return -1;
+			/* Skip this window.  Advance by want minus the
+			 * usual overlap to keep progress monotonic. */
+			if (want <= patlen)
+				cur += want ? want : 1;
+			else
+				cur += want - (patlen - 1);
+			continue;
+		}
+		r = zmem_search_buffer(cur, buf, want, pat, patlen,
+		    s_match_cb, ctx);
+		if (r < 0)
+			return -1;
+		if (r > 0)
+			return 1;
+		if (want <= patlen)
+			break;
+		/* Advance with overlap of patlen-1 to catch matches
+		 * crossing chunk boundaries. */
+		cur += want - (patlen - 1);
+	}
+	return 0;
+}
+
+/*
+ * Region filter: returns nonzero when the region should be
+ * scanned.  Honors guard-page skip and the optional -x/-w/-i
+ * filters.  Reads need at least one of read/exec.
+ */
+static int
+s_region_eligible(const struct zmap *r, int want_x, int want_w, int want_i)
+{
+	if (r->perms[3] == 'g')
+		return 0; /* skip guard pages */
+	if (want_i && r->mem_type != ZMAP_MEM_IMAGE)
+		return 0;
+	if (want_w) {
+		if (r->perms[1] != 'w')
+			return 0;
+	}
+	if (want_x) {
+		if (r->perms[2] != 'x')
+			return 0;
+		return 1;
+	}
+	/* Default: readable regions only. */
+	if (r->perms[0] != 'r')
+		return 0;
+	return 1;
+}
+
+static int
+s_parse_uint(const char *s, uint64_t *out)
+{
+	if (s == NULL || *s == 0)
+		return -1;
+	/* Use the existing expression evaluator so callers can
+	 * write 0x..., #N decimal, or plain hex.  No registers/
+	 * symbols are needed for limit/value parsing. */
+	return zexpr_eval(s, NULL, out);
+}
+
+static int
+cmd_s(struct zdbg *d, struct toks *t)
+{
+	struct s_args a;
+	uint8_t pat[ZDBG_SEARCH_MAX_PATTERN];
+	size_t patlen = 0;
+	int have_pat = 0;
+	int mode_a = 0;       /* -a / -r */
+	int mode_x = 0;
+	int mode_w = 0;
+	int mode_i = 0;
+	const char *mod_name = NULL;
+	int limit = ZDBG_SEARCH_DEFAULT_LIMIT;
+	int i;
+	struct s_match_ctx ctx;
+	const char *bytes_start = NULL;
+	const char *cmd_line;
+	int explicit_range = 0;
+	zaddr_t range_addr = 0;
+	uint64_t range_len = 0;
+
+	(void)t;
+	cmd_line = rest_from(t->orig, 1);
+	if (s_argparse(cmd_line, &a) < 0) {
+		printf("argument list too long\n");
+		return -1;
+	}
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+
+	for (i = 0; i < a.n; i++) {
+		const char *opt = a.v[i];
+		if (strcmp(opt, "-a") == 0 || strcmp(opt, "-r") == 0) {
+			mode_a = 1;
+		} else if (strcmp(opt, "-x") == 0) {
+			mode_x = 1;
+			mode_a = 1;
+		} else if (strcmp(opt, "-w") == 0) {
+			mode_w = 1;
+			mode_a = 1;
+		} else if (strcmp(opt, "-i") == 0) {
+			mode_i = 1;
+			mode_a = 1;
+		} else if (strcmp(opt, "-m") == 0) {
+			if (i + 1 >= a.n) {
+				printf("usage: s -m module pattern\n");
+				return -1;
+			}
+			mod_name = a.v[++i];
+		} else if (strcmp(opt, "-limit") == 0) {
+			uint64_t v;
+			if (i + 1 >= a.n ||
+			    s_parse_uint(a.v[i + 1], &v) < 0 || v == 0) {
+				printf("bad -limit\n");
+				return -1;
+			}
+			limit = (int)v;
+			i++;
+		} else if (strcmp(opt, "-str") == 0) {
+			if (i + 1 >= a.n) {
+				printf("usage: s -str \"text\"\n");
+				return -1;
+			}
+			if (zmem_make_ascii_pattern(a.v[++i], pat,
+			    sizeof(pat), &patlen) < 0 || patlen == 0) {
+				printf("bad string\n");
+				return -1;
+			}
+			have_pat = 1;
+		} else if (strcmp(opt, "-wstr") == 0) {
+			if (i + 1 >= a.n) {
+				printf("usage: s -wstr \"text\"\n");
+				return -1;
+			}
+			if (zmem_make_utf16le_pattern(a.v[++i], pat,
+			    sizeof(pat), &patlen) < 0 || patlen == 0) {
+				printf("bad wstring\n");
+				return -1;
+			}
+			have_pat = 1;
+		} else if (strcmp(opt, "-u32") == 0) {
+			zaddr_t v;
+			if (i + 1 >= a.n || eval_addr(d, a.v[i + 1], &v) < 0) {
+				printf("bad -u32 value\n");
+				return -1;
+			}
+			zmem_make_u32_pattern((uint32_t)v, pat, sizeof(pat),
+			    &patlen);
+			have_pat = 1;
+			i++;
+		} else if (strcmp(opt, "-u64") == 0) {
+			zaddr_t v;
+			if (i + 1 >= a.n || eval_addr(d, a.v[i + 1], &v) < 0) {
+				printf("bad -u64 value\n");
+				return -1;
+			}
+			zmem_make_u64_pattern((uint64_t)v, pat, sizeof(pat),
+			    &patlen);
+			have_pat = 1;
+			i++;
+		} else if (strcmp(opt, "-ptr") == 0) {
+			zaddr_t v;
+			if (i + 1 >= a.n) {
+				printf("usage: s -ptr expr\n");
+				return -1;
+			}
+			if (eval_addr(d, a.v[++i], &v) < 0) {
+				printf("bad -ptr expression\n");
+				return -1;
+			}
+			zmem_make_u64_pattern((uint64_t)v, pat, sizeof(pat),
+			    &patlen);
+			have_pat = 1;
+		} else if (opt[0] == '-' && opt[1] != 0) {
+			printf("unknown option: %s\n", opt);
+			return -1;
+		} else {
+			/* First non-option positional.  In the legacy
+			 * `s addr len bytes...` form this is the address;
+			 * otherwise these are raw byte tokens. */
+			if (!have_pat && !mode_a && mod_name == NULL &&
+			    i + 1 < a.n) {
+				/* Legacy form: addr len bytes... */
+				uint64_t v;
+				if (eval_addr(d, a.v[i], &range_addr) < 0) {
+					printf("bad address\n");
+					return -1;
+				}
+				if (zexpr_eval(a.v[i + 1], &d->regs, &v) < 0
+				    || v == 0) {
+					printf("bad length\n");
+					return -1;
+				}
+				range_len = v;
+				explicit_range = 1;
+				i += 2;
+				bytes_start = (i < a.n) ? a.v[i] : NULL;
+			} else {
+				bytes_start = a.v[i];
+			}
+			/* Collect remaining positional args as raw bytes,
+			 * stopping at any further `-option` so things like
+			 * `s addr len 90 90 -limit 2` keep working. */
+			if (bytes_start != NULL) {
+				char tmp[ZDBG_SEARCH_MAX_PATTERN * 4];
+				size_t tlen = 0;
+				int k;
+				int stop = i;
+				tmp[0] = 0;
+				for (k = i; k < a.n; k++) {
+					if (a.v[k][0] == '-' &&
+					    a.v[k][1] != 0) {
+						stop = k;
+						break;
+					}
+					{
+						size_t need;
+						need = strlen(a.v[k]) + 2;
+						if (tlen + need >= sizeof(tmp))
+							break;
+						if (tlen)
+							tmp[tlen++] = ' ';
+						memcpy(tmp + tlen, a.v[k],
+						    strlen(a.v[k]));
+						tlen += strlen(a.v[k]);
+						tmp[tlen] = 0;
+					}
+					stop = k + 1;
+				}
+				if (zmem_parse_bytes(tmp, pat, sizeof(pat),
+				    &patlen) < 0 || patlen == 0) {
+					printf("bad bytes\n");
+					return -1;
+				}
+				have_pat = 1;
+				/* Continue option parsing after the byte run. */
+				i = stop - 1;
+				continue;
+			}
+			break;
+		}
+	}
+
+	if (!have_pat) {
+		printf("usage:\n"
+		    "  s addr len bytes...\n"
+		    "  s -a|-r [-x|-w|-i] pattern\n"
+		    "  s -m module pattern\n"
+		    "pattern: bytes... | -str \"text\" | -wstr \"text\" |"
+		    " -u32 v | -u64 v | -ptr expr\n");
+		return -1;
+	}
+	if (patlen > ZDBG_SEARCH_MAX_PATTERN) {
+		printf("pattern too long\n");
+		return -1;
+	}
+
+	ctx.d = d;
+	ctx.count = 0;
+	ctx.limit = limit;
+	ctx.verbose = 0;
+
+	/* Refresh maps/regions/symbols opportunistically so
+	 * annotation works the same way as `addr`/`lm`. */
+	refresh_maps(d);
+	refresh_regions(d);
+	refresh_syms(d);
+
+	/* --- explicit range -------------------------------------- */
+	if (explicit_range) {
+		if (s_search_range(d, range_addr, range_addr + range_len,
+		    pat, patlen, &ctx, 0) < 0) {
+			printf("read failed at %016llx\n",
+			    (unsigned long long)range_addr);
+			return -1;
+		}
+		if (ctx.count == 0)
+			printf("no matches\n");
+		return 0;
+	}
+
+	/* --- module-relative search ------------------------------ */
+	if (mod_name != NULL) {
+		const struct zmap *m;
+		int amb = 0;
+		if (!d->have_maps) {
+			printf("no module table\n");
+			return -1;
+		}
+		m = zmaps_find_module(&d->maps, mod_name, &amb);
+		if (m == NULL) {
+			printf("%s module: %s\n",
+			    amb ? "ambiguous" : "unknown", mod_name);
+			return -1;
+		}
+		(void)s_search_range(d, m->start, m->end, pat, patlen,
+		    &ctx, 1);
+		if (ctx.count == 0)
+			printf("no matches\n");
+		return 0;
+	}
+
+	/* --- region search --------------------------------------- */
+	if (mode_a || (!explicit_range && mod_name == NULL)) {
+		const struct zmap_table *mt = NULL;
+		int searched = 0;
+		int skipped = 0;
+		int j;
+
+		if (d->have_regions && d->regions.count > 0)
+			mt = &d->regions;
+		else if (d->have_maps)
+			mt = &d->maps;
+		if (mt == NULL) {
+			printf("no regions available\n");
+			return -1;
+		}
+		for (j = 0; j < mt->count; j++) {
+			const struct zmap *r = &mt->maps[j];
+			int rc;
+
+			if (!s_region_eligible(r, mode_x, mode_w, mode_i))
+				continue;
+			searched++;
+			rc = s_search_range(d, r->start, r->end, pat, patlen,
+			    &ctx, 1);
+			if (rc > 0)
+				break; /* limit reached */
+			if (rc < 0)
+				skipped++;
+		}
+		printf("searched %d region(s), %d match(es)%s\n",
+		    searched, ctx.count,
+		    skipped ? " (some pages unreadable)" : "");
+		return 0;
+	}
+
+	printf("usage: s addr len bytes... | s -a|-m|-r ... pattern\n");
+	return -1;
 }
 
 /* --- u --------------------------------------------------------- */
@@ -3144,6 +3660,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_e(d, &t);
 	if (strcmp(mn, "f") == 0)
 		return cmd_f(d, &t);
+	if (strcmp(mn, "s") == 0)
+		return cmd_s(d, &t);
 	if (strcmp(mn, "u") == 0)
 		return cmd_u(d, &t);
 	if (strcmp(mn, "a") == 0)
