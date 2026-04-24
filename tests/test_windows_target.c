@@ -166,6 +166,51 @@ main(void)
 			printf("SKIP: no probe export resolved "
 			    "(nmods=%d nsyms=%d)\n", nmods, syms.count);
 		}
+
+		/*
+		 * Exercise VirtualQueryEx region enumeration.  The
+		 * region table should have substantially more entries
+		 * than the module table, include at least one IMAGE
+		 * region, and contain the current rsp.
+		 */
+		{
+			struct zmap_table rt;
+			const struct zmap *m;
+			int has_image = 0;
+			int j;
+
+			zmaps_init(&rt);
+			if (ztarget_windows_fill_regions(&tgt, &rt) < 0) {
+				printf("FAIL: fill_regions\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			if (rt.count <= mt.count) {
+				printf("FAIL: regions(%d) <= modules(%d)\n",
+				    rt.count, mt.count);
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			for (j = 0; j < rt.count; j++) {
+				if (rt.maps[j].mem_type == ZMAP_MEM_IMAGE) {
+					has_image = 1;
+					break;
+				}
+			}
+			if (!has_image) {
+				printf("FAIL: no MEM_IMAGE region\n");
+				ztarget_kill(&tgt);
+				return 1;
+			}
+			m = zmaps_find_by_addr(&rt, (zaddr_t)r.rsp);
+			if (m == NULL) {
+				printf("FAIL: rsp not in any committed "
+				    "region (rsp=%llx)\n",
+				    (unsigned long long)r.rsp);
+				ztarget_kill(&tgt);
+				return 1;
+			}
+		}
 	}
 
 	/*

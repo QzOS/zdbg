@@ -214,6 +214,42 @@ test_parse_raw_file_offset_valid(void)
 		FAILF("deleted-file map must not be raw_file_offset_valid");
 }
 
+/*
+ * Windows protection-to-perms helper test.  Compiled only on
+ * Windows where zmaps_protect_to_perms is available.
+ */
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+
+static void
+expect_perms(uint32_t prot, const char *want, const char *desc)
+{
+	char got[5];
+	zmaps_protect_to_perms(prot, got);
+	if (strcmp(got, want) != 0)
+		FAILF("%s: got '%s' want '%s' (prot=0x%08x)",
+		    desc, got, want, (unsigned)prot);
+}
+
+static void
+test_protect_to_perms(void)
+{
+	expect_perms(PAGE_NOACCESS,             "---p", "NOACCESS");
+	expect_perms(PAGE_READONLY,              "r--p", "READONLY");
+	expect_perms(PAGE_READWRITE,             "rw-p", "READWRITE");
+	expect_perms(PAGE_WRITECOPY,             "rw-p", "WRITECOPY");
+	expect_perms(PAGE_EXECUTE,               "--xp", "EXECUTE");
+	expect_perms(PAGE_EXECUTE_READ,          "r-xp", "EXECUTE_READ");
+	expect_perms(PAGE_EXECUTE_READWRITE,     "rwxp", "EXECUTE_READWRITE");
+	expect_perms(PAGE_EXECUTE_WRITECOPY,     "rwxp", "EXECUTE_WRITECOPY");
+	expect_perms(PAGE_GUARD | PAGE_READWRITE, "rw-g", "GUARD|RW");
+	expect_perms(PAGE_NOCACHE | PAGE_READWRITE, "rw-p", "NOCACHE|RW");
+}
+#endif /* _WIN32 */
+
 int
 main(void)
 {
@@ -225,6 +261,9 @@ main(void)
 	test_find_by_addr();
 	test_find_module_backslash();
 	test_parse_raw_file_offset_valid();
+#if defined(_WIN32)
+	test_protect_to_perms();
+#endif
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);

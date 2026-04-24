@@ -40,3 +40,13 @@ zmaps_refresh(struct ztarget *t, struct zmap_table *mt)
 	fclose(fp);
 	return 0;
 }
+
+int
+zmaps_refresh_regions(struct ztarget *t, struct zmap_table *mt)
+{
+	/* On Linux /proc/<pid>/maps is already a region view; the
+	 * file/anon classification stored in raw_file_offset_valid
+	 * and the bracketed names in `name` carry the same
+	 * information VirtualQueryEx provides on Windows. */
+	return zmaps_refresh(t, mt);
+}

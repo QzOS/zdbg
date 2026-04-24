@@ -22,6 +22,7 @@ struct zdbg {
 	struct zhwbp_table hwbps;
 	struct zregs regs;
 	struct zmap_table maps;
+	struct zmap_table regions;
 	struct zsym_table syms;
 	struct zsig_table sigs;
 	struct zexc_table excs;
@@ -30,6 +31,7 @@ struct zdbg {
 	zaddr_t asm_addr;
 	int have_regs;
 	int have_maps;
+	int have_regions;
 	int have_syms;
 	int target_argc;
 	char **target_argv;

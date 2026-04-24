@@ -593,6 +593,184 @@ ztarget_windows_fill_maps(struct ztarget *t, struct zmap_table *mt)
 		memcpy(m->name, mod->path, nlen);
 		m->name[nlen] = 0;
 		m->raw_file_offset_valid = 0;
+		m->kind = ZMAP_KIND_MODULE;
+		m->mem_type = ZMAP_MEM_IMAGE;
+	}
+	return 0;
+}
+
+/* ---- VirtualQueryEx region enumeration ---- */
+
+void
+zmaps_protect_to_perms(uint32_t protect, char out[5])
+{
+	uint32_t base;
+	int guard;
+
+	guard = (protect & PAGE_GUARD) != 0;
+	/* Drop modifier bits before classifying the access mask. */
+	base = protect & ~(uint32_t)(PAGE_GUARD | PAGE_NOCACHE |
+	    PAGE_WRITECOMBINE);
+
+	out[0] = '-';
+	out[1] = '-';
+	out[2] = '-';
+	out[3] = guard ? 'g' : 'p';
+	out[4] = 0;
+
+	switch (base) {
+	case PAGE_NOACCESS:
+		break;
+	case PAGE_READONLY:
+		out[0] = 'r';
+		break;
+	case PAGE_READWRITE:
+	case PAGE_WRITECOPY:
+		out[0] = 'r';
+		out[1] = 'w';
+		break;
+	case PAGE_EXECUTE:
+		out[2] = 'x';
+		break;
+	case PAGE_EXECUTE_READ:
+		out[0] = 'r';
+		out[2] = 'x';
+		break;
+	case PAGE_EXECUTE_READWRITE:
+	case PAGE_EXECUTE_WRITECOPY:
+		out[0] = 'r';
+		out[1] = 'w';
+		out[2] = 'x';
+		break;
+	default:
+		break;
+	}
+}
+
+/* Find a known module whose image range contains addr.  Returns
+ * the module index or -1. */
+static int
+zw_find_module_for_addr(const struct zw_target *wt, uint64_t addr)
+{
+	int i;
+
+	for (i = 0; i < wt->nmodules; i++) {
+		const struct zw_module *mod = &wt->modules[i];
+		if (mod->base == 0 || mod->size == 0)
+			continue;
+		if (addr >= mod->base && addr < mod->base + mod->size)
+			return i;
+	}
+	return -1;
+}
+
+int
+ztarget_windows_fill_regions(struct ztarget *t, struct zmap_table *mt)
+{
+	struct zw_target *wt = zw_get(t);
+	HANDLE proc;
+	SYSTEM_INFO si;
+	uint64_t addr;
+	uint64_t maxaddr;
+
+	if (wt == NULL || mt == NULL)
+		return -1;
+	mt->count = 0;
+	mt->truncated = 0;
+
+	proc = wt->process;
+	if (proc == NULL)
+		return -1;
+
+	GetNativeSystemInfo(&si);
+	addr = (uint64_t)(uintptr_t)si.lpMinimumApplicationAddress;
+	maxaddr = (uint64_t)(uintptr_t)si.lpMaximumApplicationAddress;
+
+	for (;;) {
+		MEMORY_BASIC_INFORMATION mbi;
+		SIZE_T qrc;
+		uint64_t base;
+		uint64_t next;
+
+		if (addr > maxaddr)
+			break;
+
+		memset(&mbi, 0, sizeof(mbi));
+		qrc = VirtualQueryEx(proc, (LPCVOID)(uintptr_t)addr,
+		    &mbi, sizeof(mbi));
+		if (qrc == 0) {
+			/* Skip past this page and keep going; user
+			 * regions can have unmappable holes. */
+			next = addr + (uint64_t)si.dwPageSize;
+			if (next <= addr)
+				break;
+			addr = next;
+			continue;
+		}
+
+		base = (uint64_t)(uintptr_t)mbi.BaseAddress;
+		next = base + (uint64_t)mbi.RegionSize;
+		if (next <= base) {
+			/* No progress: bail to avoid infinite loop. */
+			break;
+		}
+
+		if (mbi.State == MEM_COMMIT) {
+			struct zmap *m;
+			int modidx;
+			size_t nlen;
+			const char *name;
+
+			if (mt->count >= ZDBG_MAX_MAPS) {
+				mt->truncated = 1;
+				break;
+			}
+			m = &mt->maps[mt->count++];
+			memset(m, 0, sizeof(*m));
+			m->start = (zaddr_t)base;
+			m->end = (zaddr_t)next;
+			m->offset = 0;
+			zmaps_protect_to_perms((uint32_t)mbi.Protect,
+			    m->perms);
+			m->protect = (uint32_t)mbi.Protect;
+			m->state = (uint32_t)mbi.State;
+			m->kind = ZMAP_KIND_REGION;
+			m->raw_file_offset_valid = 0;
+
+			switch (mbi.Type) {
+			case MEM_IMAGE:
+				m->mem_type = ZMAP_MEM_IMAGE;
+				modidx = zw_find_module_for_addr(wt, base);
+				if (modidx >= 0) {
+					name = wt->modules[modidx].path;
+				} else {
+					name = "[image]";
+				}
+				break;
+			case MEM_MAPPED:
+				m->mem_type = ZMAP_MEM_MAPPED;
+				name = "[mapped]";
+				break;
+			case MEM_PRIVATE:
+				m->mem_type = ZMAP_MEM_PRIVATE;
+				if (mbi.Protect & PAGE_GUARD)
+					name = "[private guard]";
+				else
+					name = "[private]";
+				break;
+			default:
+				m->mem_type = ZMAP_MEM_UNKNOWN;
+				name = "";
+				break;
+			}
+			nlen = strlen(name);
+			if (nlen >= ZDBG_MAP_NAME_MAX)
+				nlen = ZDBG_MAP_NAME_MAX - 1;
+			memcpy(m->name, name, nlen);
+			m->name[nlen] = 0;
+		}
+
+		addr = next;
 	}
 	return 0;
 }

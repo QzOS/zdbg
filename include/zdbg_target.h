@@ -323,6 +323,17 @@ int ztarget_windows_clear_pending_exception(struct ztarget *t, uint64_t tid);
 int ztarget_windows_fill_maps(struct ztarget *t, struct zmap_table *mt);
 
 /*
+ * Enumerate committed memory regions in the target via
+ * VirtualQueryEx.  Each region becomes a struct zmap with
+ * kind=ZMAP_KIND_REGION, mem_type derived from MEMORY_BASIC_
+ * INFORMATION.Type, perms derived from .Protect, and name
+ * "[private]" / "[mapped]" / module-path-when-image.
+ * raw_file_offset_valid is always 0.  Returns 0 on success,
+ * -1 if the target has no backend state.
+ */
+int ztarget_windows_fill_regions(struct ztarget *t, struct zmap_table *mt);
+
+/*
  * Populate *st with PE export symbols from currently-loaded
  * modules.  Parses IMAGE_EXPORT_DIRECTORY from target memory
  * using module_base + RVA, skipping ordinal-only exports and
