@@ -24,6 +24,13 @@ Windows.
   mapped module files and resolves simple symbol expressions
   such as `main`, `foo`, `libc:malloc`.  This is not DWARF or
   source-level debugging.
+* Symbolization: zdbg formats addresses as nearest ELF symbols
+  and annotates stop output plus branch/call targets in `u`
+  output.  `addr expr` prints address + nearest symbol + mapping.
+* Backtrace: `bt [count]` walks the x86-64 RBP frame chain only;
+  there is no DWARF/`.eh_frame` unwinding.  Frames without
+  preserved frame pointers (e.g. much of libc compiled with
+  `-fomit-frame-pointer`) terminate the trace.
 * Proceed/step-over (`p`) only supports direct `call rel32`
   initially.  Indirect calls and complex instruction decoding
   remain out of scope.
@@ -87,6 +94,8 @@ Run the debugger:
     be n                 enable breakpoint
     lm [addr]            list maps or show map containing address
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
+    addr expr            show address, nearest symbol, containing map
+    bt [count]           frame-pointer backtrace (default 16 frames)
     g                    continue (waits for next stop)
     t                    single step (waits for next stop)
     p [count]            proceed / step over direct call
@@ -135,6 +144,12 @@ interactive tiny assembly still accept only numbers and
 registers; symbol names are not resolved inside assembled
 instruction operands in this release.
 
+`bt` is frame-pointer based only; optimized code compiled with
+omitted frame pointers may produce short or incorrect traces.
+The example target (`examples/testprog`) is built with
+`-fno-omit-frame-pointer` on GCC/Clang so manual sessions can
+see multi-frame traces.
+
 Typical session:
 
     l
@@ -142,7 +157,9 @@ Typical session:
     sym main
     b main
     g
+    addr rip
     u main 12
+    bt
     sym -r
     sym libc:malloc
 

@@ -124,6 +124,8 @@ print_help(void)
 	    "  be n                 enable breakpoint\n"
 	    "  lm [addr]            list maps or show map at addr\n"
 	    "  sym [filter|-r]      list/search/refresh ELF symbols\n"
+	    "  addr expr            show address, nearest symbol, mapping\n"
+	    "  bt [count]           frame-pointer backtrace\n"
 	    "  g                    continue\n"
 	    "  t                    single step\n"
 	    "  p                    proceed / step over direct call\n");
@@ -143,37 +145,59 @@ target_stopped(struct zdbg *d)
 	return d->target.state == ZTARGET_STOPPED;
 }
 
+/*
+ * Write " <symbol+off>" into buf if st has a symbol for addr.
+ * On no match buf is left empty.  Output always NUL-terminated.
+ */
 static void
-zstop_print(const struct zstop *st, int bp_id)
+annot_addr(const struct zdbg *d, zaddr_t addr, char *buf, size_t buflen)
 {
+	char sbuf[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 32];
+	int n;
+
+	if (buf != NULL && buflen > 0)
+		buf[0] = 0;
+	if (d == NULL || !d->have_syms || buf == NULL || buflen == 0)
+		return;
+	n = zsyms_format_addr(&d->syms, addr, sbuf, sizeof(sbuf));
+	if (n <= 0)
+		return;
+	snprintf(buf, buflen, " <%s>", sbuf);
+}
+
+static void
+zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
+{
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
 	const char *reason = "stop";
 
 	if (st == NULL)
 		return;
+	annot_addr(d, st->addr, ann, sizeof(ann));
 	switch (st->reason) {
 	case ZSTOP_INITIAL:
-		printf("stopped: initial trap rip=%016llx\n",
-		    (unsigned long long)st->addr);
+		printf("stopped: initial trap rip=%016llx%s\n",
+		    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_BREAKPOINT:
 		if (bp_id >= 0)
-			printf("stopped: breakpoint %d at %016llx\n",
-			    bp_id, (unsigned long long)st->addr);
+			printf("stopped: breakpoint %d at %016llx%s\n",
+			    bp_id, (unsigned long long)st->addr, ann);
 		else
-			printf("stopped: breakpoint rip=%016llx\n",
-			    (unsigned long long)st->addr);
+			printf("stopped: breakpoint rip=%016llx%s\n",
+			    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_SINGLESTEP:
-		printf("stopped: single-step rip=%016llx\n",
-		    (unsigned long long)st->addr);
+		printf("stopped: single-step rip=%016llx%s\n",
+		    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_SIGNAL:
-		printf("stopped: signal %d rip=%016llx\n", st->code,
-		    (unsigned long long)st->addr);
+		printf("stopped: signal %d rip=%016llx%s\n", st->code,
+		    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXCEPTION:
-		printf("stopped: exception rip=%016llx\n",
-		    (unsigned long long)st->addr);
+		printf("stopped: exception rip=%016llx%s\n",
+		    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXIT:
 		printf("exited: code %d\n", st->code);
@@ -435,6 +459,36 @@ cmd_f(struct zdbg *d, struct toks *t)
 }
 
 /* --- u --------------------------------------------------------- */
+
+/*
+ * Print a decoded instruction with the same layout as
+ * ztinydis_print() and, when the instruction has a direct
+ * target and symbols are loaded, append ` <symbol+off>`.  The
+ * core tinydis decoder stays symbol-free; symbolisation is
+ * applied only at print time.
+ */
+static void
+print_disasm_line(struct zdbg *d, const struct ztinydis *dis)
+{
+	char hex[64];
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	size_t pos = 0;
+	size_t i;
+
+	if (dis == NULL)
+		return;
+	hex[0] = 0;
+	for (i = 0; i < dis->len && pos + 3 < sizeof(hex); i++) {
+		pos += (size_t)snprintf(hex + pos, sizeof(hex) - pos,
+		    "%02x ", dis->bytes[i]);
+	}
+	ann[0] = 0;
+	if (dis->has_target)
+		annot_addr(d, dis->target, ann, sizeof(ann));
+	printf("%016llx  %-20s  %s%s\n",
+	    (unsigned long long)dis->addr, hex, dis->text, ann);
+}
+
 static int
 cmd_u(struct zdbg *d, struct toks *t)
 {
@@ -471,7 +525,7 @@ cmd_u(struct zdbg *d, struct toks *t)
 			if (ztinydis_one(addr, buf + off, sizeof(buf) - off,
 			    &dis) < 0)
 				break;
-			ztinydis_print(&dis);
+			print_disasm_line(d, &dis);
 			addr += dis.len;
 			off += dis.len;
 		}
@@ -822,7 +876,7 @@ zdbg_resume_from_bp(struct zdbg *d, int user_singlestep)
 	if (st.reason != ZSTOP_SINGLESTEP) {
 		int bp_id = -1;
 		zdbg_after_wait(d, &st, &bp_id);
-		zstop_print(&st, bp_id);
+		zstop_print(d, &st, bp_id);
 		return 1;
 	}
 
@@ -832,7 +886,7 @@ zdbg_resume_from_bp(struct zdbg *d, int user_singlestep)
 
 	if (user_singlestep) {
 		/* user asked for t: report this single-step stop */
-		zstop_print(&st, -1);
+		zstop_print(d, &st, -1);
 		return 1;
 	}
 	return 0;
@@ -880,7 +934,7 @@ cmd_run_and_wait(struct zdbg *d, int step)
 		return -1;
 	}
 	zdbg_after_wait(d, &st, &bp_id);
-	zstop_print(&st, bp_id);
+	zstop_print(d, &st, bp_id);
 	return 0;
 }
 
@@ -1028,10 +1082,12 @@ cmd_p_once(struct zdbg *d)
 
 	if (st.reason == ZSTOP_BREAKPOINT && target_stopped(d) &&
 	    d->have_regs && d->regs.rip == fallthrough) {
-		printf("stopped: proceed rip=%016llx\n",
-		    (unsigned long long)fallthrough);
+		char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+		annot_addr(d, fallthrough, ann, sizeof(ann));
+		printf("stopped: proceed rip=%016llx%s\n",
+		    (unsigned long long)fallthrough, ann);
 	} else {
-		zstop_print(&st, bp_id);
+		zstop_print(d, &st, bp_id);
 	}
 	return 0;
 }
@@ -1126,6 +1182,158 @@ cmd_sym(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- addr ------------------------------------------------------ */
+
+/*
+ * Resolve an address expression and print:
+ *   <hex-addr> [<symbol+off>] [mapping-name]
+ *
+ * All pieces are best-effort: if symbols are not loaded or
+ * maps cannot be read, those columns are omitted.
+ */
+static int
+cmd_addr(struct zdbg *d, struct toks *t)
+{
+	zaddr_t addr;
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	const struct zmap *m = NULL;
+
+	if (t->n < 2) {
+		printf("usage: addr expr\n");
+		return -1;
+	}
+	if (eval_addr(d, t->v[1], &addr) < 0) {
+		printf("bad address\n");
+		return -1;
+	}
+	annot_addr(d, addr, ann, sizeof(ann));
+	if (have_target(d) && !d->have_maps)
+		refresh_maps(d);
+	if (d->have_maps)
+		m = zmaps_find_by_addr(&d->maps, addr);
+	printf("%016llx%s%s%s\n", (unsigned long long)addr, ann,
+	    m != NULL ? " " : "",
+	    m != NULL ? m->name : "");
+	return 0;
+}
+
+/* --- bt -------------------------------------------------------- */
+
+/*
+ * Conservative x86-64 user-space canonical check.  Strict
+ * canonical rules require bits 63..47 of the address to all
+ * match (sign extension of bit 47); for a frame-pointer walker
+ * we care about user addresses only, which live in the lower
+ * half [0x0000000000001000, 0x0000800000000000).  Rejecting
+ * kernel-half and non-canonical values here also rejects zero
+ * and the first page.
+ */
+static int
+is_canonical_user_addr(uint64_t a)
+{
+	if (a < 0x1000)
+		return 0;
+	if (a >= 0x0000800000000000ULL)
+		return 0;
+	return 1;
+}
+
+static int
+read_u64_le(struct ztarget *tgt, zaddr_t addr, uint64_t *out)
+{
+	uint8_t b[8];
+	uint64_t v;
+	int i;
+
+	if (ztarget_read(tgt, addr, b, sizeof(b)) < 0)
+		return -1;
+	v = 0;
+	for (i = 0; i < 8; i++)
+		v |= (uint64_t)b[i] << (i * 8);
+	*out = v;
+	return 0;
+}
+
+static void
+print_bt_frame(struct zdbg *d, int idx, zaddr_t rip)
+{
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	annot_addr(d, rip, ann, sizeof(ann));
+	printf("#%-2d %016llx%s\n", idx, (unsigned long long)rip, ann);
+}
+
+static int
+cmd_bt(struct zdbg *d, struct toks *t)
+{
+	uint64_t count = 16;
+	uint64_t frame_delta_max = 0x100000ULL;	/* 1 MiB */
+	zaddr_t rip;
+	zaddr_t rbp;
+	uint64_t i;
+
+	if (!have_target(d) || !target_stopped(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	refresh_regs(d);
+	if (!d->have_regs) {
+		printf("no registers\n");
+		return -1;
+	}
+	if (t->n >= 2) {
+		if (zexpr_eval(t->v[1], &d->regs, &count) < 0 ||
+		    count == 0) {
+			printf("bad count\n");
+			return -1;
+		}
+	}
+	if (have_target(d) && !d->have_maps)
+		refresh_maps(d);
+
+	rip = d->regs.rip;
+	rbp = d->regs.rbp;
+
+	/* frame 0 is always the current rip */
+	print_bt_frame(d, 0, rip);
+
+	for (i = 1; i < count; i++) {
+		uint64_t next_rbp = 0;
+		uint64_t retaddr = 0;
+
+		if (!is_canonical_user_addr(rbp))
+			break;
+		if (read_u64_le(&d->target, rbp, &next_rbp) < 0)
+			break;
+		if (read_u64_le(&d->target, rbp + 8, &retaddr) < 0)
+			break;
+		if (retaddr == 0)
+			break;
+		if (!is_canonical_user_addr(retaddr))
+			break;
+		/* frame pointer must advance upward on x86-64 SysV */
+		if (next_rbp <= rbp)
+			break;
+		if (next_rbp - rbp > frame_delta_max)
+			break;
+		/* if we have a map table, require retaddr to be executable
+		 * and next_rbp to live in some mapping */
+		if (d->have_maps) {
+			const struct zmap *mr;
+			const struct zmap *mb;
+			mr = zmaps_find_by_addr(&d->maps, retaddr);
+			mb = zmaps_find_by_addr(&d->maps, next_rbp);
+			if (mr == NULL || mb == NULL)
+				break;
+			if (strchr(mr->perms, 'x') == NULL)
+				break;
+		}
+		print_bt_frame(d, (int)i, retaddr);
+		rbp = next_rbp;
+		rip = retaddr;
+	}
+	return 0;
+}
+
 /* --- l / la / ld / k ------------------------------------------- */
 
 /*
@@ -1146,7 +1354,7 @@ report_initial_stop(struct zdbg *d)
 		d->have_regs = 1;
 		st.addr = d->regs.rip;
 	}
-	zstop_print(&st, -1);
+	zstop_print(d, &st, -1);
 }
 
 static int
@@ -1371,6 +1579,10 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_lm(d, &t);
 	if (strcmp(mn, "sym") == 0)
 		return cmd_sym(d, &t);
+	if (strcmp(mn, "addr") == 0)
+		return cmd_addr(d, &t);
+	if (strcmp(mn, "bt") == 0)
+		return cmd_bt(d, &t);
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;
