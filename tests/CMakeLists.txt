@@ -10,8 +10,16 @@ add_executable(test_tinydis test_tinydis.c)
 target_link_libraries(test_tinydis PRIVATE zdbg_core)
 add_test(NAME test_tinydis COMMAND test_tinydis)
 
+add_executable(test_bp test_bp.c)
+target_link_libraries(test_bp PRIVATE zdbg_core)
+add_test(NAME test_bp COMMAND test_bp)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_linux_target test_linux_target.c)
     target_link_libraries(test_linux_target PRIVATE zdbg_core)
     add_test(NAME test_linux_target COMMAND test_linux_target)
+
+    add_executable(test_linux_bp test_linux_bp.c)
+    target_link_libraries(test_linux_bp PRIVATE zdbg_core)
+    add_test(NAME test_linux_bp COMMAND test_linux_bp)
 endif()

@@ -139,7 +139,7 @@ target_stopped(struct zdbg *d)
 }
 
 static void
-zstop_print(const struct zstop *st)
+zstop_print(const struct zstop *st, int bp_id)
 {
 	const char *reason = "stop";
 
@@ -151,8 +151,12 @@ zstop_print(const struct zstop *st)
 		    (unsigned long long)st->addr);
 		return;
 	case ZSTOP_BREAKPOINT:
-		printf("stopped: breakpoint rip=%016llx\n",
-		    (unsigned long long)st->addr);
+		if (bp_id >= 0)
+			printf("stopped: breakpoint %d at %016llx\n",
+			    bp_id, (unsigned long long)st->addr);
+		else
+			printf("stopped: breakpoint rip=%016llx\n",
+			    (unsigned long long)st->addr);
 		return;
 	case ZSTOP_SINGLESTEP:
 		printf("stopped: single-step rip=%016llx\n",
@@ -547,9 +551,13 @@ cmd_b(struct zdbg *d, struct toks *t)
 		printf("breakpoint table full\n");
 		return -1;
 	}
-	printf("bp %d at %016llx\n", id, (unsigned long long)addr);
 	if (have_target(d))
 		(void)zbp_enable(&d->target, &d->bps, id);
+	else
+		d->bps.bp[id].state = ZBP_ENABLED;
+	printf("bp %d at %016llx %s %s\n", id, (unsigned long long)addr,
+	    d->bps.bp[id].state == ZBP_ENABLED ? "enabled" : "disabled",
+	    d->bps.bp[id].installed ? "installed" : "removed");
 	return 0;
 }
 
@@ -576,13 +584,18 @@ cmd_bc(struct zdbg *d, struct toks *t)
 	if (strcmp(t->v[1], "*") == 0) {
 		for (id = 0; id < ZDBG_MAX_BREAKPOINTS; id++)
 			(void)zbp_clear(&d->target, &d->bps, id);
+		d->stopped_bp = -1;
 		return 0;
 	}
 	if (parse_bp_id(t->v[1], &id) < 0) {
 		printf("bad id\n");
 		return -1;
 	}
-	return zbp_clear(&d->target, &d->bps, id);
+	if (zbp_clear(&d->target, &d->bps, id) < 0)
+		return -1;
+	if (d->stopped_bp == id)
+		d->stopped_bp = -1;
+	return 0;
 }
 
 static int
@@ -597,6 +610,8 @@ cmd_bd(struct zdbg *d, struct toks *t)
 		printf("target operation not available in this backend yet\n");
 		return -1;
 	}
+	if (d->stopped_bp == id)
+		d->stopped_bp = -1;
 	return 0;
 }
 
@@ -604,9 +619,26 @@ static int
 cmd_be(struct zdbg *d, struct toks *t)
 {
 	int id;
+	struct zbp *b;
 	if (t->n < 2 || parse_bp_id(t->v[1], &id) < 0) {
 		printf("usage: be n\n");
 		return -1;
+	}
+	b = &d->bps.bp[id];
+	if (b->state == ZBP_EMPTY) {
+		printf("no breakpoint %d\n", id);
+		return -1;
+	}
+	/*
+	 * If we are currently stopped exactly at this breakpoint's
+	 * address waiting to execute the original instruction, do
+	 * not reinstall 0xcc here: the resume-from-bp path will do
+	 * that after the internal single-step.  Leave it logically
+	 * enabled and uninstalled.
+	 */
+	if (d->stopped_bp == id) {
+		b->state = ZBP_ENABLED;
+		return 0;
 	}
 	if (zbp_enable(&d->target, &d->bps, id) < 0) {
 		printf("target operation not available in this backend yet\n");
@@ -618,6 +650,116 @@ cmd_be(struct zdbg *d, struct toks *t)
 /* --- g / t ----------------------------------------------------- */
 
 /*
+ * Post-wait processing shared by g and t.  Refresh registers,
+ * recognize x86-64 int3 breakpoint hits belonging to zdbg, and
+ * apply the RIP-1 correction before the user sees the stop.
+ *
+ * After a known breakpoint hit the breakpoint is uninstalled
+ * (original byte restored in target memory) and d->stopped_bp
+ * holds the id.  The caller must arrange for reinstall before or
+ * during the next resume.
+ */
+static void
+zdbg_after_wait(struct zdbg *d, struct zstop *st, int *bp_idp)
+{
+	int id = -1;
+
+	if (bp_idp != NULL)
+		*bp_idp = -1;
+
+	if (target_stopped(d))
+		refresh_regs(d);
+
+	if (st != NULL && st->reason == ZSTOP_BREAKPOINT &&
+	    target_stopped(d) && d->have_regs) {
+		int rc = zbp_handle_trap(&d->target, &d->bps, &d->regs, &id);
+		if (rc == 1) {
+			d->stopped_bp = id;
+			st->addr = d->regs.rip;
+			if (bp_idp != NULL)
+				*bp_idp = id;
+			/* keep cached regs consistent with target */
+			refresh_regs(d);
+		}
+	}
+}
+
+/*
+ * If we are currently stopped on one of our own breakpoints,
+ * step over the original instruction and reinstall the int3 so
+ * the next resume does not re-hit the same trap immediately.
+ *
+ * Returns:
+ *    0  caller should proceed with the user-requested resume
+ *   +1  an internal single-step stop has already been reported;
+ *       caller should not issue another resume/wait
+ *   -1  error already printed
+ */
+static int
+zdbg_resume_from_bp(struct zdbg *d, int user_singlestep)
+{
+	int id;
+	struct zbp *b;
+	struct zstop st;
+
+	if (d->stopped_bp < 0)
+		return 0;
+
+	id = d->stopped_bp;
+	d->stopped_bp = -1;
+	if (id < 0 || id >= ZDBG_MAX_BREAKPOINTS)
+		return 0;
+	b = &d->bps.bp[id];
+
+	/* breakpoint was cleared or disabled while stopped on it */
+	if (b->state != ZBP_ENABLED)
+		return 0;
+
+	/* temporary breakpoint: do not reinstall; just drop it */
+	if (b->temporary) {
+		(void)zbp_clear(&d->target, &d->bps, id);
+		return 0;
+	}
+
+	/* step the original instruction internally */
+	if (ztarget_singlestep(&d->target) < 0) {
+		printf("singlestep failed\n");
+		return -1;
+	}
+	memset(&st, 0, sizeof(st));
+	if (ztarget_wait(&d->target, &st) < 0) {
+		printf("wait failed\n");
+		return -1;
+	}
+	if (target_stopped(d))
+		refresh_regs(d);
+
+	/*
+	 * If the internal step did not yield a clean single-step
+	 * stop (target exited, got a signal, or hit another trap),
+	 * report it to the user now and do not proceed with the
+	 * user's resume.  Do not reinstall the int3 in that case.
+	 */
+	if (st.reason != ZSTOP_SINGLESTEP) {
+		int bp_id = -1;
+		zdbg_after_wait(d, &st, &bp_id);
+		zstop_print(&st, bp_id);
+		return 1;
+	}
+
+	/* reinstall the breakpoint now that we are past it */
+	if (b->state == ZBP_ENABLED && !b->installed)
+		(void)zbp_install(&d->target, &d->bps, id);
+
+	if (user_singlestep) {
+		/* user asked for t: report this single-step stop */
+		zstop_print(&st, -1);
+		return 1;
+	}
+	return 0;
+}
+
+/*
  * Run-until-stop helper shared by g and t.  After the ptrace
  * resume the command layer always waits and reports the stop,
  * so the REPL returns with the target either stopped or exited.
@@ -626,11 +768,22 @@ static int
 cmd_run_and_wait(struct zdbg *d, int step)
 {
 	struct zstop st;
+	int bp_id = -1;
+	int rc;
 
 	if (!have_target(d)) {
 		printf("no target\n");
 		return -1;
 	}
+
+	if (d->stopped_bp >= 0) {
+		rc = zdbg_resume_from_bp(d, step);
+		if (rc < 0)
+			return -1;
+		if (rc == 1)
+			return 0;
+	}
+
 	if (step) {
 		if (ztarget_singlestep(&d->target) < 0) {
 			printf("singlestep failed\n");
@@ -647,9 +800,8 @@ cmd_run_and_wait(struct zdbg *d, int step)
 		printf("wait failed\n");
 		return -1;
 	}
-	if (target_stopped(d))
-		refresh_regs(d);
-	zstop_print(&st);
+	zdbg_after_wait(d, &st, &bp_id);
+	zstop_print(&st, bp_id);
 	return 0;
 }
 
@@ -687,7 +839,7 @@ report_initial_stop(struct zdbg *d)
 		d->have_regs = 1;
 		st.addr = d->regs.rip;
 	}
-	zstop_print(&st);
+	zstop_print(&st, -1);
 }
 
 static int
@@ -767,6 +919,7 @@ cmd_ld(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	ztarget_init(&d->target);
+	d->stopped_bp = -1;
 	printf("detached\n");
 	return 0;
 }
@@ -784,6 +937,7 @@ cmd_k(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	ztarget_init(&d->target);
+	d->stopped_bp = -1;
 	printf("killed\n");
 	return 0;
 }
@@ -802,6 +956,7 @@ zdbg_init(struct zdbg *d)
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
+	d->stopped_bp = -1;
 }
 
 void

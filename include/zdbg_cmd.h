@@ -19,6 +19,7 @@ struct zdbg {
 	int have_regs;
 	int target_argc;
 	char **target_argv;
+	int stopped_bp;		/* id of breakpoint currently stopped on, -1 otherwise */
 };
 
 void zdbg_init(struct zdbg *d);
