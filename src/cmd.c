@@ -267,8 +267,13 @@ zstop_print(const struct zdbg *d, const struct zstop *st, int bp_id)
 		    (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXCEPTION:
-		printf("stopped: %sexception rip=%016llx%s\n",
-		    tp, (unsigned long long)st->addr, ann);
+		if (st->code != 0)
+			printf("stopped: %sexception 0x%08x rip=%016llx%s\n",
+			    tp, (unsigned int)st->code,
+			    (unsigned long long)st->addr, ann);
+		else
+			printf("stopped: %sexception rip=%016llx%s\n",
+			    tp, (unsigned long long)st->addr, ann);
 		return;
 	case ZSTOP_EXIT:
 		if (tp[0] != 0)

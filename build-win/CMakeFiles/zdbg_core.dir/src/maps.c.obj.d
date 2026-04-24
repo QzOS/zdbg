@@ -1,0 +1,26 @@
+CMakeFiles/zdbg_core.dir/src/maps.c.obj: \
+ /home/runner/work/zdbg/zdbg/src/maps.c \
+ /usr/share/mingw-w64/include/stdio.h \
+ /usr/share/mingw-w64/include/corecrt_stdio_config.h \
+ /usr/share/mingw-w64/include/corecrt.h \
+ /usr/share/mingw-w64/include/_mingw.h \
+ /usr/share/mingw-w64/include/_mingw_mac.h \
+ /usr/share/mingw-w64/include/_mingw_secapi.h \
+ /usr/share/mingw-w64/include/vadefs.h \
+ /usr/share/mingw-w64/include/sdks/_mingw_ddk.h \
+ /usr/share/mingw-w64/include/_mingw_off_t.h \
+ /usr/share/mingw-w64/include/swprintf.inl \
+ /usr/share/mingw-w64/include/sec_api/stdio_s.h \
+ /usr/share/mingw-w64/include/string.h \
+ /usr/share/mingw-w64/include/crtdefs.h \
+ /usr/share/mingw-w64/include/sec_api/string_s.h \
+ /usr/share/mingw-w64/include/ctype.h \
+ /home/runner/work/zdbg/zdbg/include/zdbg_maps.h \
+ /home/runner/work/zdbg/zdbg/include/zdbg.h \
+ /usr/lib/gcc/x86_64-w64-mingw32/13-win32/include/stdint.h \
+ /usr/share/mingw-w64/include/stdint.h \
+ /usr/lib/gcc/x86_64-w64-mingw32/13-win32/include/stddef.h \
+ /usr/share/mingw-w64/include/stddef.h \
+ /home/runner/work/zdbg/zdbg/include/zdbg_target.h \
+ /home/runner/work/zdbg/zdbg/include/zdbg_arch.h \
+ /home/runner/work/zdbg/zdbg/include/zdbg_regs.h

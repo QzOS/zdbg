@@ -69,3 +69,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     set_tests_properties(test_linux_signals PROPERTIES
         ENVIRONMENT "ZDBG_TESTSIGNALS=$<TARGET_FILE:testsignals>")
 endif()
+
+if(WIN32)
+    add_executable(test_windows_target test_windows_target.c)
+    target_link_libraries(test_windows_target PRIVATE zdbg_core)
+    add_test(NAME test_windows_target COMMAND test_windows_target)
+    set_tests_properties(test_windows_target PROPERTIES
+        ENVIRONMENT "ZDBG_TESTPROG=$<TARGET_FILE:testprog>")
+endif()

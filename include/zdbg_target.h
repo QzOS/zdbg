@@ -217,4 +217,34 @@ int ztarget_linux_set_pending_signal(struct ztarget *t, uint64_t tid,
     int sig);
 #endif /* __linux__ */
 
+#if defined(_WIN32)
+int ztarget_windows_launch(struct ztarget *t, int argc, char **argv);
+int ztarget_windows_attach(struct ztarget *t, uint64_t pid);
+int ztarget_windows_detach(struct ztarget *t);
+int ztarget_windows_kill(struct ztarget *t);
+int ztarget_windows_wait(struct ztarget *t, struct zstop *st);
+int ztarget_windows_continue(struct ztarget *t);
+int ztarget_windows_singlestep(struct ztarget *t);
+int ztarget_windows_read(struct ztarget *t, zaddr_t addr, void *buf,
+    size_t len);
+int ztarget_windows_write(struct ztarget *t, zaddr_t addr, const void *buf,
+    size_t len);
+int ztarget_windows_flush_icache(struct ztarget *t, zaddr_t addr, size_t len);
+int ztarget_windows_getregs(struct ztarget *t, struct zregs *r);
+int ztarget_windows_setregs(struct ztarget *t, const struct zregs *r);
+int ztarget_windows_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
+int ztarget_windows_set_debugreg(struct ztarget *t, int regno, uint64_t v);
+int ztarget_windows_set_debugreg_all(struct ztarget *t, int regno, uint64_t v);
+int ztarget_windows_thread_count(struct ztarget *t);
+int ztarget_windows_thread_get(struct ztarget *t, int idx,
+    struct zthread *out);
+int ztarget_windows_select_thread(struct ztarget *t, uint64_t tid);
+uint64_t ztarget_windows_current_thread(struct ztarget *t);
+int ztarget_windows_refresh_threads(struct ztarget *t);
+int ztarget_windows_get_pending_signal(struct ztarget *t, uint64_t tid,
+    int *sigp);
+int ztarget_windows_set_pending_signal(struct ztarget *t, uint64_t tid,
+    int sig);
+#endif /* _WIN32 */
+
 #endif /* ZDBG_TARGET_H */
