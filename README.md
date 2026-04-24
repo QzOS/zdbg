@@ -56,6 +56,11 @@ Windows.
   not fully race-free in heavy multi-threaded targets, no
   thread-specific breakpoints, no non-stop mode, no
   fork/exec following.
+* Signal handling: Linux stops expose pending signals per
+  thread; `sig` can clear or set the signal delivered on next
+  resume; `handle` controls stop/pass/print policy.  Signal
+  policy is process-wide inside zdbg, not per-thread.  Windows
+  exception policy is not implemented yet.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 
 On non-Linux hosts every target-dependent command still prints
@@ -124,6 +129,11 @@ Run the debugger:
     t                    single step (waits for next stop)
     p [count]            proceed / step over direct call
     th [tid|index]       list/select traced thread
+    sig                  show pending signal for selected thread
+    sig -l               list known signals
+    sig 0                clear pending signal
+    sig SIGSEGV          set pending signal for next resume
+    handle [sig [opts]]  show/set signal stop/pass/print policy
 
 Address expressions accept raw numbers (default hex), registers
 (`rip+10`), and — on Linux, after a target has been
@@ -220,6 +230,8 @@ Typical session:
     examples/       manual target programs
                      - testprog     single-threaded
                      - testthreads  pthread-based, for `th` sessions
+                     - testsignals  raises SIGUSR1/SIGUSR2 for
+                                    `sig`/`handle` sessions
 
 Platform-specific headers are confined to the matching backend
 file; `<sys/ptrace.h>` only appears under `src/os_linux/` and

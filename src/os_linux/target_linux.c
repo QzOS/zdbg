@@ -72,6 +72,7 @@
 #endif
 
 #include "zdbg_target.h"
+#include "zdbg_signal.h"
 
 #ifndef __WALL
 #define __WALL 0x40000000
@@ -1236,6 +1237,52 @@ ztarget_linux_refresh_threads(struct ztarget *t)
 	if (lt == NULL)
 		return -1;
 	return zl_attach_new_tasks(lt);
+}
+
+int
+ztarget_linux_get_pending_signal(struct ztarget *t, uint64_t tid, int *sigp)
+{
+	struct zlinux_target *lt = zl_get(t);
+	struct zlinux_thread *th;
+	pid_t p;
+
+	if (lt == NULL || sigp == NULL)
+		return -1;
+	if (tid == 0)
+		p = lt->current_tid;
+	else if (tid > 0x7fffffffULL)
+		return -1;
+	else
+		p = (pid_t)tid;
+	th = zl_find(lt, p);
+	if (th == NULL)
+		return -1;
+	*sigp = th->last_signal;
+	return 0;
+}
+
+int
+ztarget_linux_set_pending_signal(struct ztarget *t, uint64_t tid, int sig)
+{
+	struct zlinux_target *lt = zl_get(t);
+	struct zlinux_thread *th;
+	pid_t p;
+
+	if (lt == NULL)
+		return -1;
+	if (sig < 0 || sig >= ZDBG_MAX_SIGNALS)
+		return -1;
+	if (tid == 0)
+		p = lt->current_tid;
+	else if (tid > 0x7fffffffULL)
+		return -1;
+	else
+		p = (pid_t)tid;
+	th = zl_find(lt, p);
+	if (th == NULL)
+		return -1;
+	th->last_signal = sig;
+	return 0;
 }
 
 #endif /* __linux__ */

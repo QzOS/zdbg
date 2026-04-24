@@ -145,6 +145,19 @@ int ztarget_set_debugreg(struct ztarget *t, int regno, uint64_t v);
 int ztarget_set_debugreg_all(struct ztarget *t, int regno, uint64_t v);
 
 /*
+ * Pending-signal access for the selected or specified thread.
+ * tid == 0 means "current selected thread".  sig == 0 clears
+ * the pending signal.  Returns 0 on success, -1 on failure or
+ * when the backend does not track pending signals.
+ *
+ * "Pending" here refers to the signal the backend would
+ * redeliver to the tracee on the next PTRACE_CONT/SINGLESTEP.
+ * Reading does not consume the pending signal.
+ */
+int ztarget_get_pending_signal(struct ztarget *t, uint64_t tid, int *sigp);
+int ztarget_set_pending_signal(struct ztarget *t, uint64_t tid, int sig);
+
+/*
  * Backend entry points.  Implementations live in target_null.c,
  * os_linux/target_linux.c and os_windows/target_windows.c.  Only
  * one backend is active per build; src/target.c selects it.
@@ -171,6 +184,10 @@ int ztarget_null_thread_get(struct ztarget *t, int idx, struct zthread *out);
 int ztarget_null_select_thread(struct ztarget *t, uint64_t tid);
 uint64_t ztarget_null_current_thread(struct ztarget *t);
 int ztarget_null_refresh_threads(struct ztarget *t);
+int ztarget_null_get_pending_signal(struct ztarget *t, uint64_t tid,
+    int *sigp);
+int ztarget_null_set_pending_signal(struct ztarget *t, uint64_t tid,
+    int sig);
 
 #if defined(__linux__)
 int ztarget_linux_launch(struct ztarget *t, int argc, char **argv);
@@ -194,6 +211,10 @@ int ztarget_linux_thread_get(struct ztarget *t, int idx, struct zthread *out);
 int ztarget_linux_select_thread(struct ztarget *t, uint64_t tid);
 uint64_t ztarget_linux_current_thread(struct ztarget *t);
 int ztarget_linux_refresh_threads(struct ztarget *t);
+int ztarget_linux_get_pending_signal(struct ztarget *t, uint64_t tid,
+    int *sigp);
+int ztarget_linux_set_pending_signal(struct ztarget *t, uint64_t tid,
+    int sig);
 #endif /* __linux__ */
 
 #endif /* ZDBG_TARGET_H */

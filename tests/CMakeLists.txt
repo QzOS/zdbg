@@ -30,6 +30,10 @@ add_executable(test_symbols test_symbols.c)
 target_link_libraries(test_symbols PRIVATE zdbg_core)
 add_test(NAME test_symbols COMMAND test_symbols)
 
+add_executable(test_signal test_signal.c)
+target_link_libraries(test_signal PRIVATE zdbg_core)
+add_test(NAME test_signal COMMAND test_signal)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_linux_target test_linux_target.c)
     target_link_libraries(test_linux_target PRIVATE zdbg_core)
@@ -54,4 +58,10 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME test_linux_threads COMMAND test_linux_threads)
     set_tests_properties(test_linux_threads PROPERTIES
         ENVIRONMENT "ZDBG_TESTTHREADS=$<TARGET_FILE:testthreads>")
+
+    add_executable(test_linux_signals test_linux_signals.c)
+    target_link_libraries(test_linux_signals PRIVATE zdbg_core)
+    add_test(NAME test_linux_signals COMMAND test_linux_signals)
+    set_tests_properties(test_linux_signals PROPERTIES
+        ENVIRONMENT "ZDBG_TESTSIGNALS=$<TARGET_FILE:testsignals>")
 endif()
