@@ -47,6 +47,10 @@
 #define ZW_MAX_THREADS ZDBG_MAX_THREADS
 #define ZW_MAX_MODULES 256
 #define ZW_MODULE_NAME_MAX 260
+/* Reasonable ceiling for IMAGE_DOS_HEADER.e_lfanew to reject
+ * corrupt PE headers without locking us out of large real-world
+ * images. */
+#define ZW_PE_MAX_E_LFANEW 0x100000
 
 struct zw_thread {
 	DWORD tid;
@@ -268,7 +272,7 @@ zw_read_size_of_image(struct zw_target *wt, uint64_t base)
 	if (dos.e_magic != IMAGE_DOS_SIGNATURE)
 		return 0;
 	e_lfanew = dos.e_lfanew;
-	if (e_lfanew <= 0 || e_lfanew > 0x100000)
+	if (e_lfanew <= 0 || e_lfanew > ZW_PE_MAX_E_LFANEW)
 		return 0;
 	if (!ReadProcessMemory(wt->process,
 	    (LPCVOID)(uintptr_t)(base + (uint64_t)e_lfanew),
@@ -346,7 +350,7 @@ zw_module_remove(struct zw_target *wt, uint64_t base)
 
 /* ---------------- PE export parsing (from target memory) -------- */
 
-#define ZW_PE_MAX_EXPORTS 65536
+#define ZW_PE_MAX_EXPORTS 65536		/* generous cap vs. corrupt PE */
 #define ZW_PE_MAX_NAMELEN 512
 
 /*
@@ -424,7 +428,7 @@ zw_load_exports(struct zw_target *wt, const struct zw_module *mod,
 		return;
 	if (dos.e_magic != IMAGE_DOS_SIGNATURE)
 		return;
-	if (dos.e_lfanew <= 0 || dos.e_lfanew > 0x100000)
+	if (dos.e_lfanew <= 0 || dos.e_lfanew > ZW_PE_MAX_E_LFANEW)
 		return;
 	if (!ReadProcessMemory(wt->process,
 	    (LPCVOID)(uintptr_t)(base + (uint64_t)dos.e_lfanew),
