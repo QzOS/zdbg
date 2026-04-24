@@ -14,6 +14,14 @@ add_executable(test_bp test_bp.c)
 target_link_libraries(test_bp PRIVATE zdbg_core)
 add_test(NAME test_bp COMMAND test_bp)
 
+add_executable(test_maps test_maps.c)
+target_link_libraries(test_maps PRIVATE zdbg_core)
+add_test(NAME test_maps COMMAND test_maps)
+
+add_executable(test_expr_maps test_expr_maps.c)
+target_link_libraries(test_expr_maps PRIVATE zdbg_core)
+add_test(NAME test_expr_maps COMMAND test_expr_maps)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_linux_target test_linux_target.c)
     target_link_libraries(test_linux_target PRIVATE zdbg_core)
