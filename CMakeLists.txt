@@ -28,6 +28,7 @@ set(ZDBG_CORE_SOURCES
     src/signal.c
     src/exception.c
     src/patch.c
+    src/pe.c
     src/cmd.c
     src/repl.c)
 

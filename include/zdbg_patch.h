@@ -39,6 +39,15 @@ struct zpatch {
 	int has_file;
 	char file[ZDBG_PATCH_FILE_MAX];
 	uint64_t file_off;
+
+	/*
+	 * Optional PE-image RVA, valid when has_rva != 0.  Set
+	 * for Windows PE-backed patches so `pf` can show both the
+	 * RVA and the raw file offset.  Linux raw-file mappings
+	 * leave has_rva == 0.
+	 */
+	int has_rva;
+	uint64_t rva;
 };
 
 struct zpatch_table {
@@ -91,6 +100,28 @@ int  zpatch_find_overlap(const struct zpatch_table *pt,
  */
 int  zpatch_va_to_file(const struct zmap_table *maps, zaddr_t addr,
     size_t len, char *file, size_t filecap, uint64_t *offp);
+
+/*
+ * Extended VA-to-file resolver.
+ *
+ * Behaves like zpatch_va_to_file() for raw-file-offset-valid
+ * mappings (Linux /proc/<pid>/maps).  For maps whose name is a
+ * PE file path but raw_file_offset_valid == 0 (Windows synthetic
+ * image maps) the function parses the PE32+ file on disk and
+ * translates rva = addr - map.start to a raw file offset.  It
+ * succeeds only when the whole [addr, addr+len) lies inside one
+ * PE section's raw-backed range.
+ *
+ * If rvap != NULL it receives the PE RVA on success when the
+ * resolution went through the PE path (otherwise *rvap is left
+ * unchanged).  Callers can detect the PE path by passing a
+ * sentinel value.
+ *
+ * Returns 0 on success, -1 otherwise.
+ */
+int  zpatch_va_to_file_ex(const struct zmap_table *maps, zaddr_t addr,
+    size_t len, char *file, size_t filecap, uint64_t *offp,
+    uint64_t *rvap, int *via_pe);
 
 /*
  * Populate p->has_file/p->file/p->file_off from *maps if the

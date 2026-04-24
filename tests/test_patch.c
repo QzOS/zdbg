@@ -248,10 +248,10 @@ test_va_to_file(void)
 
 /*
  * A Windows-synthetic module map describes the loaded PE image
- * and has raw_file_offset_valid == 0.  zpatch_va_to_file must
- * refuse it even though the name looks like a regular file, so
- * `pw` cannot accidentally patch the disk using an RVA as a
- * file offset.
+ * and has raw_file_offset_valid == 0.  When the named path is
+ * not actually a PE file on disk, zpatch_va_to_file must refuse
+ * it cleanly so `pw` cannot accidentally patch the disk using
+ * an RVA as a file offset.
  */
 static void
 test_va_to_file_refuses_synthetic(void)
@@ -274,8 +274,42 @@ test_va_to_file_refuses_synthetic(void)
 	off = 0xdeadbeef;
 	if (zpatch_va_to_file(&mt, 0x7ffb9abc1234ULL, 4, file,
 	    sizeof(file), &off) == 0)
-		FAILF("synthetic (Windows) image map must be refused "
-		    "by zpatch_va_to_file");
+		FAILF("synthetic (Windows) image map without a PE on "
+		    "disk must be refused by zpatch_va_to_file");
+}
+
+/*
+ * Synthetic-image-map paths that obviously cannot be opened as
+ * regular files (the "module@<hex>" fallback and NT device
+ * paths) must be refused without even attempting to fopen them.
+ */
+static void
+test_va_to_file_refuses_unopenable(void)
+{
+	struct zmap_table mt;
+	char file[256];
+	uint64_t off;
+
+	zmaps_init(&mt);
+	mt.count = 0;
+	mt.maps[0].start = 0x7ffb9abc0000ULL;
+	mt.maps[0].end = 0x7ffb9adf0000ULL;
+	mt.maps[0].offset = 0;
+	strcpy(mt.maps[0].perms, "r-xp");
+	strcpy(mt.maps[0].name, "module@00007ffb9abc0000");
+	mt.maps[0].raw_file_offset_valid = 0;
+	mt.count = 1;
+
+	off = 0;
+	if (zpatch_va_to_file(&mt, 0x7ffb9abc1234ULL, 4, file,
+	    sizeof(file), &off) == 0)
+		FAILF("synthetic 'module@...' path must be refused");
+
+	strcpy(mt.maps[0].name,
+	    "\\Device\\HarddiskVolume3\\foo\\bar.exe");
+	if (zpatch_va_to_file(&mt, 0x7ffb9abc1234ULL, 4, file,
+	    sizeof(file), &off) == 0)
+		FAILF("NT device path must be refused");
 }
 
 static void
@@ -459,6 +493,7 @@ main(void)
 	test_state_transitions();
 	test_va_to_file();
 	test_va_to_file_refuses_synthetic();
+	test_va_to_file_refuses_unopenable();
 	test_resolve_file();
 	test_file_write_match();
 
