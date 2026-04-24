@@ -12,6 +12,8 @@
 
 #if defined(__linux__)
 #define ZBACKEND(fn) ztarget_linux_##fn
+#elif defined(_WIN32)
+#define ZBACKEND(fn) ztarget_windows_##fn
 #else
 #define ZBACKEND(fn) ztarget_null_##fn
 #endif

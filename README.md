@@ -7,7 +7,16 @@ Windows.
 
 * Linux ptrace backend: minimal launch/attach/read/write/register/
   continue/singlestep support against a single traced x86-64 task.
-* Windows backend: still stubbed.
+* Windows backend: first x64 Debug API backend.  Supports
+  launch (`CreateProcess` with `DEBUG_ONLY_THIS_PROCESS`),
+  attach (`DebugActiveProcess`), detach, kill, memory
+  read/write (`ReadProcessMemory`/`WriteProcessMemory`),
+  instruction-cache flush, x64 register get/set via
+  `CONTEXT`, continue and single-step (trap flag), basic
+  debug-event thread tracking, and software breakpoints via
+  `EXCEPTION_BREAKPOINT` mapping.  Windows symbols, module
+  maps, PE/PDB, hardware breakpoints, watchpoints, WOW64,
+  and Windows exception policy are not implemented yet.
 * Breakpoints: software breakpoints (`int3`) support RIP-1
   correction, original-byte restore, single-step rearm, and
   continue from breakpoint for the current single traced Linux
@@ -72,6 +81,11 @@ Windows.
   patches can still be inspected or saved after the process is
   gone.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
+* Windows support is younger than Linux support.  No PDB, no
+  module maps, no PE symbols, no hardware breakpoints or
+  watchpoints, no Windows exception policy, no WOW64, no
+  file-backed `pw` through Windows mappings.  `lm`/`sym`/`bt`
+  and POSIX `sig`/`handle` semantics are Linux-only for now.
 
 On non-Linux hosts every target-dependent command still prints
 
@@ -100,8 +114,12 @@ deliberately avoids:
     cmake --build build
     ctest --test-dir build
 
-No external dependencies.  Builds with GCC, Clang, or (later)
-MSVC.
+No external dependencies.  Builds with GCC, Clang, or MSVC.
+The same commands work on Windows inside a Developer PowerShell:
+
+    cmake -S . -B build
+    cmake --build build
+    ctest --test-dir build
 
 Run the debugger:
 
