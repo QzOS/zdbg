@@ -50,7 +50,6 @@ struct zlinux_target {
 	pid_t tid;
 	int attached;		/* attached via PTRACE_ATTACH */
 	int launched;		/* created by us via fork+exec */
-	int initial_trap_seen;	/* first post-exec/attach trap consumed */
 	int singlestep_pending;	/* next wait should report as singlestep */
 	int exited;
 	int exit_code;
@@ -150,7 +149,6 @@ ztarget_linux_launch(struct ztarget *t, int argc, char **argv)
 	lt->tid = pid;
 	lt->launched = 1;
 	lt->attached = 0;
-	lt->initial_trap_seen = 1;	/* consumed here */
 	lt->singlestep_pending = 0;
 	lt->exited = 0;
 	lt->exit_code = 0;
@@ -193,7 +191,6 @@ ztarget_linux_attach(struct ztarget *t, uint64_t pid)
 	lt->tid = p;
 	lt->attached = 1;
 	lt->launched = 0;
-	lt->initial_trap_seen = 1;
 	lt->singlestep_pending = 0;
 	lt->exited = 0;
 	lt->exit_code = 0;
@@ -252,14 +249,15 @@ ztarget_linux_kill(struct ztarget *t)
 
 /*
  * Translate a raw waitpid() status into a struct zstop.  The
- * caller owns the interpretation of SIGTRAP: we distinguish the
- * first post-launch/attach trap (ZSTOP_INITIAL), a trap that
- * follows a PTRACE_SINGLESTEP request (ZSTOP_SINGLESTEP) and all
- * other SIGTRAPs, which are currently reported as
- * ZSTOP_BREAKPOINT.  Later issues must distinguish software
- * breakpoints, syscall/exec/clone events and hardware watchpoint
- * causes properly; for now we deliberately keep the mapping
- * approximate.
+ * first post-launch/attach trap is consumed inside the launch
+ * and attach paths themselves (see the launch contract at the
+ * top of this file), so by the time we get here a SIGTRAP is
+ * either the result of a PTRACE_SINGLESTEP we just issued or
+ * something else (most commonly a software-breakpoint int3).
+ * Later issues will need to distinguish software breakpoints
+ * from syscall/exec/clone events and hardware watchpoint
+ * causes; for now we deliberately keep the mapping approximate
+ * and report non-singlestep SIGTRAPs as ZSTOP_BREAKPOINT.
  */
 static void
 zl_map_status(struct zlinux_target *lt, int status, struct zstop *st)
@@ -287,14 +285,10 @@ zl_map_status(struct zlinux_target *lt, int status, struct zstop *st)
 	if (WIFSTOPPED(status)) {
 		int sig = WSTOPSIG(status);
 		if (sig == SIGTRAP) {
-			if (!lt->initial_trap_seen) {
-				st->reason = ZSTOP_INITIAL;
-				lt->initial_trap_seen = 1;
-			} else if (lt->singlestep_pending) {
+			if (lt->singlestep_pending)
 				st->reason = ZSTOP_SINGLESTEP;
-			} else {
+			else
 				st->reason = ZSTOP_BREAKPOINT;
-			}
 		} else {
 			st->reason = ZSTOP_SIGNAL;
 			st->code = sig;

@@ -669,6 +669,27 @@ cmd_t(struct zdbg *d, struct toks *t)
 
 /* --- l / la / ld / k ------------------------------------------- */
 
+/*
+ * Report the synthetic initial stop after a successful launch
+ * or attach.  The backend has already consumed the real
+ * exec-trap/attach-stop internally; we just refresh cached
+ * registers and print a compact "stopped: initial trap rip=..."
+ * line so the user can immediately start inspecting the target.
+ */
+static void
+report_initial_stop(struct zdbg *d)
+{
+	struct zstop st;
+
+	memset(&st, 0, sizeof(st));
+	st.reason = ZSTOP_INITIAL;
+	if (ztarget_getregs(&d->target, &d->regs) == 0) {
+		d->have_regs = 1;
+		st.addr = d->regs.rip;
+	}
+	zstop_print(&st);
+}
+
 static int
 cmd_l(struct zdbg *d, struct toks *t)
 {
@@ -703,16 +724,7 @@ cmd_l(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	printf("launched pid %llu\n", (unsigned long long)d->target.pid);
-	{
-		struct zstop st;
-		memset(&st, 0, sizeof(st));
-		st.reason = ZSTOP_INITIAL;
-		if (ztarget_getregs(&d->target, &d->regs) == 0) {
-			d->have_regs = 1;
-			st.addr = d->regs.rip;
-		}
-		zstop_print(&st);
-	}
+	report_initial_stop(d);
 	return 0;
 }
 
@@ -738,16 +750,7 @@ cmd_la(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 	printf("attached pid %llu\n", (unsigned long long)d->target.pid);
-	{
-		struct zstop st;
-		memset(&st, 0, sizeof(st));
-		st.reason = ZSTOP_INITIAL;
-		if (ztarget_getregs(&d->target, &d->regs) == 0) {
-			d->have_regs = 1;
-			st.addr = d->regs.rip;
-		}
-		zstop_print(&st);
-	}
+	report_initial_stop(d);
 	return 0;
 }
 
