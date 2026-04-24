@@ -1,9 +1,10 @@
 /*
  * test_windows_target.c - Windows-only smoke test for the Win32
- * Debug API backend.  Launches a trivial target (cmd.exe /c exit
- * falls back to the examples testprog if ZDBG_TESTPROG is set),
- * verifies we stop at the initial breakpoint, reads registers,
- * and lets it run to exit.
+ * Debug API backend.  Uses the examples testprog (when the test
+ * framework passes its path via ZDBG_TESTPROG) and otherwise
+ * falls back to launching cmd.exe so the test still runs on a
+ * bare developer machine.  Verifies we stop at the initial
+ * breakpoint, reads registers, and lets the target exit.
  *
  * Non-Windows builds compile this as a no-op so CTest stays
  * portable.
