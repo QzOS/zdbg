@@ -258,9 +258,9 @@ zhwbp_handle_trap(struct ztarget *t, struct zhwbp_table *ht,
 		return 0;
 
 	/*
-	 * Clear DR6 so stale B0..B3 bits do not cause future false
-	 * reports.  The upper bits of DR6 are preserved as zero; we
-	 * do not track BS/BT/BD here.
+	 * Clear DR6 wholesale so stale B0..B3 bits do not cause
+	 * future false reports.  BS/BT/BD/RTM are also cleared;
+	 * zdbg does not currently track those causes.
 	 */
 	(void)ztarget_set_debugreg(t, 6, 0);
 

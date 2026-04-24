@@ -146,8 +146,8 @@ test_dr7_build_write_len4_slot1(void)
 	uint64_t dr7;
 
 	zhwbp_table_init(&ht);
-	(void)zhwbp_alloc(&ht, 0x2000, ZHWBP_EXEC, 1); /* slot 0 empty? */
-	/* Fill slot 0 so next alloc lands in slot 1. */
+	/* Fill slot 0 so the next alloc lands in slot 1. */
+	(void)zhwbp_alloc(&ht, 0x2000, ZHWBP_EXEC, 1);
 	ht.bp[0].state = ZHWBP_DISABLED;
 	/* Force slot 1 allocation */
 	{
