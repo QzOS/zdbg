@@ -5,15 +5,22 @@ Windows.
 
 ## Current status
 
-Framework only.  The REPL, expression parser, tiny patch
-assembler/disassembler, breakpoint table and OS abstraction are
-all in place, but target control (ptrace on Linux, the Win32
-Debug API on Windows) is still stubbed out.  Target-dependent
-commands print
+* Linux ptrace backend: minimal launch/attach/read/write/register/
+  continue/singlestep support against a single traced x86-64 task.
+* Windows backend: still stubbed.
+* Breakpoints: `int3` can be inserted and cleared, but full
+  breakpoint-hit repair and automatic rearm is not complete yet.
+* Thread handling: single traced task only; no clone/fork
+  following, no `PTRACE_O_TRACECLONE`, no `/proc/<pid>/task`
+  enumeration on attach.
+* No DWARF/PDB, no symbols, no module enumeration, no hardware
+  breakpoints or watchpoints, no remote debugging.
+
+On non-Linux hosts every target-dependent command still prints
 
     target operation not available in this backend yet
 
-until a real backend is implemented in a follow-up issue.
+until a real backend is implemented for that platform.
 
 ## Non-goals
 
@@ -38,12 +45,16 @@ MSVC.
 Run the debugger:
 
     ./build/zdbg
-    ./build/zdbg ./examples/testprog
+    ./build/zdbg ./build/examples/testprog
 
 ## Command sketch
 
     ?                    help
     q                    quit
+    l [path [args...]]   launch target
+    la pid               attach to pid
+    ld                   detach from target
+    k                    kill target
     r [reg [value]]      show/set registers
     d [addr [len]]       dump memory
     x [addr [len]]       alias for d
@@ -57,19 +68,19 @@ Run the debugger:
     bc n|*               clear breakpoint
     bd n                 disable breakpoint
     be n                 enable breakpoint
-    g                    continue
-    t                    single step
+    g                    continue (waits for next stop)
+    t                    single step (waits for next stop)
 
 ## Architecture overview
 
     include/        public headers
     src/            core implementation
         target.c        OS-agnostic dispatcher
-        target_null.c   fallback backend
-        os_linux/       Linux ptrace backend (stubbed)
+        target_null.c   fallback backend (non-Linux, errors cleanly)
+        os_linux/       Linux ptrace backend (real)
         os_windows/     Win32 Debug API backend (stubbed)
     tests/          CTest-driven unit tests
-    examples/       manual target programs
+    examples/       manual target programs (e.g. `testprog`)
 
 Platform-specific headers are confined to the matching backend
 file; `<sys/ptrace.h>` only appears under `src/os_linux/` and

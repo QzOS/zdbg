@@ -1,15 +1,20 @@
 /*
  * target.c - OS-independent target dispatcher.
  *
- * Chooses a backend at compile time.  The initial framework
- * routes every call to the null backend on all platforms; the
- * Linux and Windows backend files exist so later issues can
- * implement them without having to re-plumb the dispatcher.
+ * Chooses a backend at compile time.  On Linux the real ptrace
+ * backend in src/os_linux/target_linux.c is used; on every other
+ * platform the null backend keeps the rest of the program safe.
  */
 
 #include <string.h>
 
 #include "zdbg_target.h"
+
+#if defined(__linux__)
+#define ZBACKEND(fn) ztarget_linux_##fn
+#else
+#define ZBACKEND(fn) ztarget_null_##fn
+#endif
 
 void
 ztarget_init(struct ztarget *t)
@@ -27,9 +32,9 @@ ztarget_fini(struct ztarget *t)
 	if (t == NULL)
 		return;
 	/*
-	 * Best-effort detach through the backend.  The null backend
-	 * accepts this as a no-op.  Real backends will clean up
-	 * their per-target state here in later issues.
+	 * Best-effort cleanup through the backend.  A running or
+	 * stopped target is detached so we do not leave orphaned
+	 * traced processes behind.
 	 */
 	if (t->state == ZTARGET_RUNNING || t->state == ZTARGET_STOPPED)
 		(void)ztarget_detach(t);
@@ -39,71 +44,71 @@ ztarget_fini(struct ztarget *t)
 int
 ztarget_launch(struct ztarget *t, int argc, char **argv)
 {
-	return ztarget_null_launch(t, argc, argv);
+	return ZBACKEND(launch)(t, argc, argv);
 }
 
 int
 ztarget_attach(struct ztarget *t, uint64_t pid)
 {
-	return ztarget_null_attach(t, pid);
+	return ZBACKEND(attach)(t, pid);
 }
 
 int
 ztarget_detach(struct ztarget *t)
 {
-	return ztarget_null_detach(t);
+	return ZBACKEND(detach)(t);
 }
 
 int
 ztarget_kill(struct ztarget *t)
 {
-	return ztarget_null_kill(t);
+	return ZBACKEND(kill)(t);
 }
 
 int
 ztarget_wait(struct ztarget *t, struct zstop *st)
 {
-	return ztarget_null_wait(t, st);
+	return ZBACKEND(wait)(t, st);
 }
 
 int
 ztarget_continue(struct ztarget *t)
 {
-	return ztarget_null_continue(t);
+	return ZBACKEND(continue)(t);
 }
 
 int
 ztarget_singlestep(struct ztarget *t)
 {
-	return ztarget_null_singlestep(t);
+	return ZBACKEND(singlestep)(t);
 }
 
 int
 ztarget_read(struct ztarget *t, zaddr_t addr, void *buf, size_t len)
 {
-	return ztarget_null_read(t, addr, buf, len);
+	return ZBACKEND(read)(t, addr, buf, len);
 }
 
 int
 ztarget_write(struct ztarget *t, zaddr_t addr, const void *buf, size_t len)
 {
-	return ztarget_null_write(t, addr, buf, len);
+	return ZBACKEND(write)(t, addr, buf, len);
 }
 
 int
 ztarget_flush_icache(struct ztarget *t, zaddr_t addr, size_t len)
 {
-	return ztarget_null_flush_icache(t, addr, len);
+	return ZBACKEND(flush_icache)(t, addr, len);
 }
 
 int
 ztarget_getregs(struct ztarget *t, struct zregs *r)
 {
-	return ztarget_null_getregs(t, r);
+	return ZBACKEND(getregs)(t, r);
 }
 
 int
 ztarget_setregs(struct ztarget *t, const struct zregs *r)
 {
-	return ztarget_null_setregs(t, r);
+	return ZBACKEND(setregs)(t, r);
 }
