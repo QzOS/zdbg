@@ -15,6 +15,33 @@
 #include "zdbg_cmd.h"
 #include "zdbg_regfile.h"
 
+/*
+ * Native target architecture for the active backend.  Currently
+ * the supported backends only run native targets: cross-arch
+ * debugging is not implemented.
+ */
+static enum zarch
+zarch_native_for_backend(void)
+{
+#if defined(__linux__) && defined(__aarch64__)
+	return ZARCH_AARCH64;
+#elif defined(__linux__) && defined(__x86_64__)
+	return ZARCH_X86_64;
+#elif defined(_WIN32)
+	return ZARCH_X86_64;
+#else
+	return ZARCH_NONE;
+#endif
+}
+
+int
+zdbg_backend_supports_arch(enum zarch arch)
+{
+	if (arch == ZARCH_NONE)
+		return 0;
+	return arch == zarch_native_for_backend() ? 1 : 0;
+}
+
 const struct zarch_ops *
 zarch_get(enum zarch arch)
 {
@@ -54,10 +81,20 @@ zdbg_set_arch(struct zdbg *d, enum zarch arch)
 int
 zdbg_select_arch_for_target(struct zdbg *d)
 {
+	enum zarch arch;
+
+	if (d == NULL)
+		return -1;
 	/*
-	 * Both currently supported OS backends (Linux ptrace and
-	 * the Windows Debug API) only run x86-64 targets.  Future
-	 * ELF e_machine / PE Machine detection plugs in here.
+	 * Prefer the architecture the OS backend reported for the
+	 * current target.  If no target is loaded yet, fall back
+	 * to the backend's native architecture so the early REPL
+	 * still has a sensible default.
 	 */
-	return zdbg_set_arch(d, ZARCH_X86_64);
+	arch = d->target.arch;
+	if (arch == ZARCH_NONE)
+		arch = zarch_native_for_backend();
+	if (arch == ZARCH_NONE)
+		return -1;
+	return zdbg_set_arch(d, arch);
 }

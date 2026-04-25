@@ -736,10 +736,14 @@ zdbg separates two axes:
   software-breakpoint PC correction after a trap, abstract PC/SP/FP
   register access, command-level register print/get/set, and
   frame-pointer backtrace through `struct zarch_ops`.  x86-64 is
-  currently the only implemented target architecture.  AArch64 has
-  a stub ops table but no working backend, register file, decode,
-  or assembly yet; the stub fails cleanly with messages like
-  "assembly not supported for architecture aarch64".
+  the primary target architecture.  AArch64 has a phase-1 native
+  Linux backend that supports launch/attach, memory I/O, integer
+  register read/write through `zreg_file`, continue, single-step,
+  and software breakpoints using `BRK #0`; a real AArch64
+  disassembler, assembler, hardware breakpoints/watchpoints, and
+  unwinder are still unimplemented and the corresponding ops fail
+  cleanly with messages like "assembly not supported for
+  architecture aarch64".
 
 Generic command, run-control and breakpoint code reaches for
 architecture-specific behavior only through the ops table on
@@ -755,12 +759,15 @@ and mutated via `zdbg_set_arch()`, which keeps `d->arch_id`,
 ...`) the command layer also runs `zmachine_detect_file()` over
 the executable on disk: ELF64 with `EM_X86_64`/`EM_AARCH64` and
 PE32+ with `IMAGE_FILE_MACHINE_AMD64`/`IMAGE_FILE_MACHINE_ARM64`
-are recognized.  x86-64 is supported; AArch64 is recognized but
-rejected before launch because the backend register/control path
-is not implemented yet.  32-bit ELF/PE (ELFCLASS32, PE32) and
+are recognized.  The detected architecture is then matched against
+`zdbg_backend_supports_arch()`: only the active backend's native
+architecture is accepted.  Cross-architecture debugging is not
+implemented, so an AArch64 ELF on an x86-64 host (or vice versa)
+is rejected with an `unsupported target architecture: ... on this
+backend/host` message.  32-bit ELF/PE (ELFCLASS32, PE32) and
 unknown machine types are rejected with a clear message.
 Attach (`la`) does not yet detect the target's machine type and
-defaults to the active backend's x86-64 path; per-platform
+defaults to the active backend's native architecture; per-platform
 attach detection is future work.
 
 Register storage is still x86-64-shaped in the OS backends:
@@ -796,13 +803,21 @@ Limitations of this phase:
 
 * Only integer registers are represented; no SIMD/FPU/vector
   registers yet.
-* Backend get/set register APIs (`ztarget_getregs`,
-  `ztarget_setregs`) are still x86-64-shaped internally; a real
-  AArch64 register backend is future work.
-* The AArch64 stub exposes an empty register file; every
-  register lookup fails cleanly.
+* On x86-64 backends the `struct zregs` shape is still used
+  internally; the AArch64 path goes directly through
+  `PTRACE_GETREGSET`/`PTRACE_SETREGSET` (`NT_PRSTATUS`) and
+  populates `struct zreg_file` without a `struct zregs`
+  intermediary.
+* AArch64 support is native-host only: the Linux backend only
+  debugs targets matching its native architecture.  Cross-arch
+  debugging is not implemented.
+* AArch64 `u` shows raw words (or "unsupported" diagnostics)
+  because no AArch64 disassembler is wired up yet.  `a`/`pa`
+  are unsupported on AArch64.  `hb`/`hw` are unsupported on
+  AArch64 (DR0..DR7 are x86-64-only; AArch64 hardware debug
+  registers are future work).
 * Attach machine detection is not implemented; attach defaults
-  to the currently supported x86-64 backend.
+  to the backend's native architecture.
 
 For portable scripts, prefer the role aliases:
 

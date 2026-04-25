@@ -120,6 +120,11 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_test(NAME test_linux_signals COMMAND test_linux_signals)
     set_tests_properties(test_linux_signals PROPERTIES
         ENVIRONMENT "ZDBG_TESTSIGNALS=$<TARGET_FILE:testsignals>")
+
+    add_executable(test_linux_aarch64_target test_linux_aarch64_target.c)
+    target_link_libraries(test_linux_aarch64_target PRIVATE zdbg_core)
+    add_test(NAME test_linux_aarch64_target
+        COMMAND test_linux_aarch64_target)
 endif()
 
 if(WIN32)

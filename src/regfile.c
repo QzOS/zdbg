@@ -52,6 +52,63 @@ static const struct zreg_alias x86_64_aliases[] = {
 #define X86_64_ALIAS_COUNT \
 	((int)(sizeof(x86_64_aliases) / sizeof(x86_64_aliases[0])))
 
+/*
+ * AArch64 integer register file: 31 GPRs (x0..x30), sp, pc, and
+ * pstate.  Roles map pc/sp/fp to pc/sp/x29.  Aliases provide the
+ * traditional names `fp` (x29) and `lr` (x30) plus the
+ * architecture-neutral `ip` -> `pc`.  The optional 32-bit views
+ * `wN` are intentionally not exposed yet; canonical 64-bit `xN`
+ * is sufficient for phase 1.
+ */
+static const struct zreg_desc aarch64_desc[] = {
+	{ "x0",     64, ZREG_ROLE_NONE, 1 },
+	{ "x1",     64, ZREG_ROLE_NONE, 1 },
+	{ "x2",     64, ZREG_ROLE_NONE, 1 },
+	{ "x3",     64, ZREG_ROLE_NONE, 1 },
+	{ "x4",     64, ZREG_ROLE_NONE, 1 },
+	{ "x5",     64, ZREG_ROLE_NONE, 1 },
+	{ "x6",     64, ZREG_ROLE_NONE, 1 },
+	{ "x7",     64, ZREG_ROLE_NONE, 1 },
+	{ "x8",     64, ZREG_ROLE_NONE, 1 },
+	{ "x9",     64, ZREG_ROLE_NONE, 1 },
+	{ "x10",    64, ZREG_ROLE_NONE, 1 },
+	{ "x11",    64, ZREG_ROLE_NONE, 1 },
+	{ "x12",    64, ZREG_ROLE_NONE, 1 },
+	{ "x13",    64, ZREG_ROLE_NONE, 1 },
+	{ "x14",    64, ZREG_ROLE_NONE, 1 },
+	{ "x15",    64, ZREG_ROLE_NONE, 1 },
+	{ "x16",    64, ZREG_ROLE_NONE, 1 },
+	{ "x17",    64, ZREG_ROLE_NONE, 1 },
+	{ "x18",    64, ZREG_ROLE_NONE, 1 },
+	{ "x19",    64, ZREG_ROLE_NONE, 1 },
+	{ "x20",    64, ZREG_ROLE_NONE, 1 },
+	{ "x21",    64, ZREG_ROLE_NONE, 1 },
+	{ "x22",    64, ZREG_ROLE_NONE, 1 },
+	{ "x23",    64, ZREG_ROLE_NONE, 1 },
+	{ "x24",    64, ZREG_ROLE_NONE, 1 },
+	{ "x25",    64, ZREG_ROLE_NONE, 1 },
+	{ "x26",    64, ZREG_ROLE_NONE, 1 },
+	{ "x27",    64, ZREG_ROLE_NONE, 1 },
+	{ "x28",    64, ZREG_ROLE_NONE, 1 },
+	{ "x29",    64, ZREG_ROLE_FP,   1 },
+	{ "x30",    64, ZREG_ROLE_NONE, 1 },
+	{ "sp",     64, ZREG_ROLE_SP,   1 },
+	{ "pc",     64, ZREG_ROLE_PC,   1 },
+	{ "pstate", 64, ZREG_ROLE_NONE, 1 }
+};
+
+#define AARCH64_DESC_COUNT \
+	((int)(sizeof(aarch64_desc) / sizeof(aarch64_desc[0])))
+
+static const struct zreg_alias aarch64_aliases[] = {
+	{ "fp", "x29" },
+	{ "lr", "x30" },
+	{ "ip", "pc"  }
+};
+
+#define AARCH64_ALIAS_COUNT \
+	((int)(sizeof(aarch64_aliases) / sizeof(aarch64_aliases[0])))
+
 /* --- helpers --------------------------------------------------- */
 
 static int
@@ -135,9 +192,15 @@ zregfile_init(struct zreg_file *rf, enum zarch arch)
 		rf->aliases = x86_64_aliases;
 		rf->alias_count = X86_64_ALIAS_COUNT;
 		rf->count = X86_64_DESC_COUNT;
+	} else if (arch == ZARCH_AARCH64) {
+		rf->desc = aarch64_desc;
+		rf->desc_count = AARCH64_DESC_COUNT;
+		rf->aliases = aarch64_aliases;
+		rf->alias_count = AARCH64_ALIAS_COUNT;
+		rf->count = AARCH64_DESC_COUNT;
 	}
-	/* Other architectures (ZARCH_NONE, ZARCH_AARCH64) get an
-	 * empty register file: every lookup fails cleanly. */
+	/* ZARCH_NONE leaves the register file empty: every lookup
+	 * fails cleanly. */
 }
 
 /*
@@ -311,6 +374,31 @@ print_x86_64(const struct zreg_file *rf)
 	    (unsigned long long)v[16], (unsigned long long)v[17]);
 }
 
+static void
+print_aarch64(const struct zreg_file *rf)
+{
+	uint64_t v[34];
+	int i;
+
+	for (i = 0; i < 34; i++)
+		v[i] = rf->val[i].valid ? rf->val[i].value : 0;
+	/* x0..x27 in 4-per-row blocks. */
+	for (i = 0; i < 28; i += 4) {
+		printf("x%-2d=%016llx  x%-2d=%016llx  "
+		    "x%-2d=%016llx  x%-2d=%016llx\n",
+		    i,     (unsigned long long)v[i],
+		    i + 1, (unsigned long long)v[i + 1],
+		    i + 2, (unsigned long long)v[i + 2],
+		    i + 3, (unsigned long long)v[i + 3]);
+	}
+	printf("x28=%016llx  x29=%016llx  x30=%016llx\n",
+	    (unsigned long long)v[28], (unsigned long long)v[29],
+	    (unsigned long long)v[30]);
+	printf("sp =%016llx  pc =%016llx  pstate=%016llx\n",
+	    (unsigned long long)v[31], (unsigned long long)v[32],
+	    (unsigned long long)v[33]);
+}
+
 void
 zregfile_print(const struct zreg_file *rf)
 {
@@ -322,6 +410,10 @@ zregfile_print(const struct zreg_file *rf)
 	}
 	if (rf->arch == ZARCH_X86_64) {
 		print_x86_64(rf);
+		return;
+	}
+	if (rf->arch == ZARCH_AARCH64) {
+		print_aarch64(rf);
 		return;
 	}
 	/* Generic fallback: one register per line. */
