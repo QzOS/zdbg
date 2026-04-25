@@ -4,6 +4,20 @@
  * Encoding policy is deterministic: mnemonics pick the encoding
  * size, not the operand range.  jmp, jz, jnz, call are always
  * rel32.  jmp8, jz8, jnz8 are always rel8.
+ *
+ * The encoder also supports a small set of absolute-target
+ * pseudo-instructions used to span the full 64-bit address space
+ * within a single fixed-size patch slot:
+ *
+ *     jmpabs  imm64        movabs r11, imm64; jmp  r11   (13 bytes)
+ *     callabs imm64        movabs r11, imm64; call r11   (13 bytes)
+ *     jzabs   imm64        inverted skip + jmpabs        (15 bytes)
+ *     jnzabs  imm64        inverted skip + jmpabs        (15 bytes)
+ *
+ * (jeabs/jneabs are accepted as aliases of jzabs/jnzabs.)
+ *
+ * These pseudo-instructions clobber r11.  Any patch containing
+ * them must not assume r11 is preserved across the patched range.
  */
 
 #include <stdio.h>
@@ -11,6 +25,7 @@
 #include <ctype.h>
 
 #include "zdbg_arch.h"
+#include "zdbg_arch_x86_64.h"
 #include "zdbg_expr.h"
 #include "zdbg_tinyasm.h"
 

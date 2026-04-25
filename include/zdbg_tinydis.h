@@ -17,25 +17,13 @@
 #define ZDBG_TINYDIS_H
 
 #include "zdbg.h"
+#include "zdbg_arch.h"
 
-enum zinsn_kind {
-	ZINSN_OTHER = 0,
-	ZINSN_NOP,
-	ZINSN_INT3,
-	ZINSN_RET,
-	ZINSN_CALL,
-	ZINSN_JMP,
-	ZINSN_JCC,
-	ZINSN_PUSH,
-	ZINSN_POP,
-	ZINSN_MOV,
-	ZINSN_LEA,
-	ZINSN_ADD,
-	ZINSN_SUB,
-	ZINSN_CMP,
-	ZINSN_TEST,
-	ZINSN_XOR
-};
+/*
+ * Backward-compatible alias.  The legacy x86-only name was
+ * ZINSN_INT3; the generic enum spells it ZINSN_BREAKPOINT.
+ */
+#define ZINSN_INT3 ZINSN_BREAKPOINT
 
 struct ztinydis {
 	zaddr_t addr;

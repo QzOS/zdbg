@@ -8,6 +8,7 @@
 #include <stdio.h>
 
 #include "zdbg.h"
+#include "zdbg_arch.h"
 #include "zdbg_target.h"
 #include "zdbg_bp.h"
 #include "zdbg_hwbp.h"
@@ -21,6 +22,8 @@
 
 struct zdbg {
 	struct ztarget target;
+	enum zarch arch_id;
+	const struct zarch_ops *arch;
 	struct zbp_table bps;
 	struct zhwbp_table hwbps;
 	struct zregs regs;
