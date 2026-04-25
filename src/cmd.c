@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <limits.h>
 
 #include "zdbg.h"
 #include "zdbg_cmd.h"
@@ -123,6 +124,10 @@ print_help(void)
 	    "  s -m module pattern  search one module range\n"
 	    "  s -str|-wstr|-u32|-u64|-ptr ...\n"
 	    "                       string/integer/pointer pattern forms\n"
+	    "  c addr1 len addr2    compare two memory ranges\n"
+	    "  m src len dst        copy/move memory inside target (journaled)\n"
+	    "  wf addr len path     write target memory range to host file\n"
+	    "  rf path addr [len]   read host file bytes into target (journaled)\n"
 	    "  u [addr [count]]     tiny unassemble\n"
 	    "  a [addr]             interactive tiny assemble\n"
 	    "  pa addr len insn     patch instruction + NOP fill\n"
@@ -659,41 +664,46 @@ cmd_f(struct zdbg *d, struct toks *t)
 	return zdbg_patch_write(d, addr, buf, (size_t)len, "f");
 }
 
-/* --- s --------------------------------------------------------- */
+/* --- quote-aware splitter ------------------------------------- */
 
 /*
- * Quote-aware re-tokenizer for the `s` command.  The default
- * tokenizer splits on whitespace which would break
- * `s -str "hello world"`, so the search command does its own
- * pass over t->orig.  Honors:
+ * Quote-aware re-tokenizer used by commands that need to keep
+ * a quoted segment as a single argument: `s` (so
+ * `s -str "hello world"` works) and the file-I/O commands `wf`
+ * and `rf` (so paths with spaces survive).  Honors:
  *   - whitespace separators
  *   - "double-quoted" segments (kept as a single argument with
  *     quotes stripped); inside quotes a backslash escapes the
  *     next character literally so escape sequences like \" and
- *     \\ survive into the pattern builder, which interprets
- *     them itself.
+ *     \\ survive into any later interpreter (e.g. the search
+ *     pattern builder, which interprets them itself).
  */
-#define ZDBG_S_MAX_ARGS 32
-#define ZDBG_S_BUF_SIZE 512
+#define ZDBG_CMD_MAX_QARGS 32
+#define ZDBG_CMD_QBUF_SIZE 512
 
-struct s_args {
-	char buf[ZDBG_S_BUF_SIZE];
-	char *v[ZDBG_S_MAX_ARGS];
+struct cmd_qargs {
+	char buf[ZDBG_CMD_QBUF_SIZE];
+	char *v[ZDBG_CMD_MAX_QARGS];
 	int n;
 };
 
-static int
-s_argparse(const char *line, struct s_args *a)
+int
+zcmd_split_quoted(const char *line, char *buf, size_t buflen,
+    char **argv, int maxargv, int *argcp)
 {
 	char *out;
 	const char *p;
 	size_t cap;
 	size_t used = 0;
+	int n = 0;
 	int c;
 
-	a->n = 0;
-	out = a->buf;
-	cap = sizeof(a->buf);
+	if (line == NULL || buf == NULL || argv == NULL ||
+	    argcp == NULL || buflen == 0 || maxargv <= 0)
+		return -1;
+	*argcp = 0;
+	out = buf;
+	cap = buflen;
 	p = line;
 
 	for (;;) {
@@ -701,9 +711,9 @@ s_argparse(const char *line, struct s_args *a)
 			p++;
 		if (*p == 0)
 			break;
-		if (a->n >= ZDBG_S_MAX_ARGS)
+		if (n >= maxargv)
 			return -1;
-		a->v[a->n++] = out;
+		argv[n++] = out;
 		while (*p && *p != ' ' && *p != '\t') {
 			if (*p == '"') {
 				p++;
@@ -711,8 +721,8 @@ s_argparse(const char *line, struct s_args *a)
 					c = *p++;
 					if (c == '\\' && *p) {
 						/* Preserve the backslash and the next
-						 * character literally so pattern builder
-						 * can interpret escapes. */
+						 * character literally so any pattern
+						 * builder can interpret escapes. */
 						if (used + 1 >= cap)
 							return -1;
 						*out++ = (char)c;
@@ -738,7 +748,16 @@ s_argparse(const char *line, struct s_args *a)
 		*out++ = 0;
 		used++;
 	}
+	*argcp = n;
 	return 0;
+}
+
+static int
+cmd_qsplit(const char *line, struct cmd_qargs *a)
+{
+	a->n = 0;
+	return zcmd_split_quoted(line, a->buf, sizeof(a->buf),
+	    a->v, ZDBG_CMD_MAX_QARGS, &a->n);
 }
 
 struct s_match_ctx {
@@ -887,10 +906,12 @@ s_parse_uint(const char *s, uint64_t *out)
 	return zexpr_eval(s, NULL, out);
 }
 
+/* --- s --------------------------------------------------------- */
+
 static int
 cmd_s(struct zdbg *d, struct toks *t)
 {
-	struct s_args a;
+	struct cmd_qargs a;
 	uint8_t pat[ZDBG_SEARCH_MAX_PATTERN];
 	size_t patlen = 0;
 	int have_pat = 0;
@@ -910,7 +931,7 @@ cmd_s(struct zdbg *d, struct toks *t)
 
 	(void)t;
 	cmd_line = rest_from(t->orig, 1);
-	if (s_argparse(cmd_line, &a) < 0) {
+	if (cmd_qsplit(cmd_line, &a) < 0) {
 		printf("argument list too long\n");
 		return -1;
 	}
@@ -1168,6 +1189,467 @@ cmd_s(struct zdbg *d, struct toks *t)
 
 	printf("usage: s addr len bytes... | s -a|-m|-r ... pattern\n");
 	return -1;
+}
+
+/* --- memio (c, m, wf, rf) helpers ----------------------------- */
+
+#define ZDBG_MEMIO_CHUNK    65536
+#define ZDBG_C_DEFAULT_LIMIT 128
+
+/*
+ * Chunked patch-write helper used by `m` and `rf`.  Splits the
+ * write into pieces no larger than ZDBG_PATCH_MAX_BYTES, reading
+ * each old-byte chunk from the target before recording it in the
+ * patch journal so each step is independently undoable.
+ *
+ * On success returns 0 and sets *written_out to len.  On a
+ * read/write failure returns -1 and *written_out is the number
+ * of bytes successfully written before the failure (so callers
+ * can report a partial failure).  When the patch journal becomes
+ * full mid-stream the helper stops and returns 1, again with
+ * *written_out set to the byte count written so far.  The
+ * instruction cache is flushed for each successfully-written
+ * chunk.
+ *
+ * The helper deliberately does not print per-chunk status; the
+ * caller renders one summary line at the end.
+ */
+static int
+zdbg_patch_write_chunked(struct zdbg *d, zaddr_t addr,
+    const uint8_t *buf, size_t len, const char *origin,
+    size_t *written_out)
+{
+	size_t off = 0;
+
+	if (written_out != NULL)
+		*written_out = 0;
+	if (!have_target(d) || !target_stopped(d) || len == 0)
+		return -1;
+
+	while (off < len) {
+		size_t chunk = len - off;
+		uint8_t oldb[ZDBG_PATCH_MAX_BYTES];
+		int id;
+		int overlap;
+
+		if (chunk > ZDBG_PATCH_MAX_BYTES)
+			chunk = ZDBG_PATCH_MAX_BYTES;
+
+		if (ztarget_read(&d->target, addr + off, oldb, chunk) < 0)
+			return -1;
+		if (ztarget_write(&d->target, addr + off, buf + off,
+		    chunk) < 0)
+			return -1;
+		(void)ztarget_flush_icache(&d->target, addr + off, chunk);
+
+		overlap = zpatch_find_overlap(&d->patches, addr + off, chunk);
+		if (overlap >= 0)
+			printf("warn: patch overlaps existing patch %d\n",
+			    overlap);
+
+		id = zpatch_record(&d->patches, addr + off, oldb,
+		    buf + off, chunk, origin);
+		if (id < 0) {
+			/* Journal full.  The bytes were already written;
+			 * we report partial progress so the caller can
+			 * decide whether to roll forward unjournaled
+			 * (rf intentionally does not). */
+			off += chunk;
+			if (written_out != NULL)
+				*written_out = off;
+			return 1;
+		}
+		if (have_target(d) && !d->have_maps)
+			refresh_maps(d);
+		if (d->have_maps)
+			(void)zpatch_resolve_file(
+			    &d->patches.patches[id], &d->maps);
+
+		off += chunk;
+	}
+	if (written_out != NULL)
+		*written_out = off;
+	return 0;
+}
+
+/* --- c addr1 len addr2 ---------------------------------------- */
+static int
+cmd_c(struct zdbg *d, struct toks *t)
+{
+	struct cmd_qargs a;
+	const char *cmd_line;
+	int i;
+	int limit = ZDBG_C_DEFAULT_LIMIT;
+	zaddr_t a1 = 0, a2 = 0;
+	uint64_t len = 0;
+	int have_a1 = 0, have_len = 0, have_a2 = 0;
+	uint8_t b1[ZDBG_MEMIO_CHUNK];
+	uint8_t b2[ZDBG_MEMIO_CHUNK];
+	uint64_t off;
+	int diffs = 0;
+	int hit_limit = 0;
+
+	cmd_line = rest_from(t->orig, 1);
+	if (cmd_qsplit(cmd_line, &a) < 0) {
+		printf("argument list too long\n");
+		return -1;
+	}
+	for (i = 0; i < a.n; i++) {
+		const char *opt = a.v[i];
+		if (strcmp(opt, "-limit") == 0) {
+			uint64_t v;
+			if (i + 1 >= a.n ||
+			    zexpr_eval(a.v[i + 1], NULL, &v) < 0 ||
+			    v == 0 || v > (uint64_t)INT_MAX) {
+				printf("bad -limit\n");
+				return -1;
+			}
+			limit = (int)v;
+			i++;
+		} else if (opt[0] == '-' && opt[1] != 0) {
+			printf("unknown option: %s\n", opt);
+			return -1;
+		} else if (!have_a1) {
+			if (eval_addr(d, opt, &a1) < 0) {
+				printf("bad address\n");
+				return -1;
+			}
+			have_a1 = 1;
+		} else if (!have_len) {
+			if (zexpr_eval(opt, &d->regs, &len) < 0 || len == 0) {
+				printf("bad length\n");
+				return -1;
+			}
+			have_len = 1;
+		} else if (!have_a2) {
+			if (eval_addr(d, opt, &a2) < 0) {
+				printf("bad address\n");
+				return -1;
+			}
+			have_a2 = 1;
+		} else {
+			printf("usage: c [-limit N] addr1 len addr2\n");
+			return -1;
+		}
+	}
+	if (!have_a1 || !have_len || !have_a2) {
+		printf("usage: c [-limit N] addr1 len addr2\n");
+		return -1;
+	}
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+
+	off = 0;
+	while (off < len) {
+		uint64_t want64 = len - off;
+		size_t want;
+		size_t k;
+
+		if (want64 > sizeof(b1))
+			want = sizeof(b1);
+		else
+			want = (size_t)want64;
+		if (ztarget_read(&d->target, a1 + off, b1, want) < 0) {
+			printf("read failed at %016llx\n",
+			    (unsigned long long)(a1 + off));
+			return -1;
+		}
+		if (ztarget_read(&d->target, a2 + off, b2, want) < 0) {
+			printf("read failed at %016llx\n",
+			    (unsigned long long)(a2 + off));
+			return -1;
+		}
+		for (k = 0; k < want; k++) {
+			if (b1[k] == b2[k])
+				continue;
+			printf("%016llx: %02x != %02x   other=%016llx\n",
+			    (unsigned long long)(a1 + off + k),
+			    b1[k], b2[k],
+			    (unsigned long long)(a2 + off + k));
+			diffs++;
+			if (diffs >= limit) {
+				hit_limit = 1;
+				break;
+			}
+		}
+		if (hit_limit)
+			break;
+		off += want;
+	}
+
+	if (diffs == 0)
+		printf("ranges equal\n");
+	else if (hit_limit)
+		printf("%d differences shown (limit reached)\n", diffs);
+	else
+		printf("%d differences shown\n", diffs);
+	return 0;
+}
+
+/* --- m src len dst -------------------------------------------- */
+static int
+cmd_m(struct zdbg *d, struct toks *t)
+{
+	zaddr_t src, dst;
+	uint64_t len;
+	uint8_t buf[ZDBG_MEMIO_CHUNK];
+	uint64_t off;
+	int backward;
+	size_t total_written = 0;
+	int rc;
+
+	if (t->n != 4) {
+		printf("usage: m src len dst\n");
+		return -1;
+	}
+	if (eval_addr(d, t->v[1], &src) < 0) {
+		printf("bad source address\n");
+		return -1;
+	}
+	if (zexpr_eval(t->v[2], &d->regs, &len) < 0 || len == 0) {
+		printf("bad length\n");
+		return -1;
+	}
+	if (eval_addr(d, t->v[3], &dst) < 0) {
+		printf("bad destination address\n");
+		return -1;
+	}
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (!target_stopped(d)) {
+		printf("no stopped target\n");
+		return -1;
+	}
+
+	/* memmove-safe overlap: copy backward when dst is inside
+	 * (src, src+len) so a chunked forward copy would clobber
+	 * source bytes before we read them. */
+	backward = (dst > src) && (dst < src + len);
+
+	off = 0;
+	while (off < len) {
+		uint64_t remaining = len - off;
+		size_t want = sizeof(buf);
+		uint64_t cur;
+		size_t written = 0;
+
+		if ((uint64_t)want > remaining)
+			want = (size_t)remaining;
+		cur = backward ? (len - off - want) : off;
+
+		if (ztarget_read(&d->target, src + cur, buf, want) < 0) {
+			printf("move failed after %llu bytes written\n",
+			    (unsigned long long)total_written);
+			return -1;
+		}
+		rc = zdbg_patch_write_chunked(d, dst + cur, buf, want, "m",
+		    &written);
+		total_written += written;
+		if (rc < 0) {
+			printf("move failed after %llu bytes written\n",
+			    (unsigned long long)total_written);
+			return -1;
+		}
+		if (rc > 0) {
+			printf("patch journal full after %llu bytes written\n",
+			    (unsigned long long)total_written);
+			return -1;
+		}
+		off += want;
+	}
+	printf("moved %llu bytes from %016llx to %016llx\n",
+	    (unsigned long long)len,
+	    (unsigned long long)src, (unsigned long long)dst);
+	return 0;
+}
+
+/* --- wf addr len path ----------------------------------------- */
+static int
+cmd_wf(struct zdbg *d, struct toks *t)
+{
+	struct cmd_qargs a;
+	const char *cmd_line;
+	zaddr_t addr;
+	uint64_t len;
+	const char *path;
+	FILE *fp;
+	uint8_t buf[ZDBG_MEMIO_CHUNK];
+	uint64_t off;
+	uint64_t total = 0;
+
+	cmd_line = rest_from(t->orig, 1);
+	if (cmd_qsplit(cmd_line, &a) < 0) {
+		printf("argument list too long\n");
+		return -1;
+	}
+	if (a.n != 3) {
+		printf("usage: wf addr len path\n");
+		return -1;
+	}
+	if (eval_addr(d, a.v[0], &addr) < 0) {
+		printf("bad address\n");
+		return -1;
+	}
+	if (zexpr_eval(a.v[1], &d->regs, &len) < 0 || len == 0) {
+		printf("bad length\n");
+		return -1;
+	}
+	path = a.v[2];
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+
+	fp = fopen(path, "wb");
+	if (fp == NULL) {
+		printf("could not open file: %s\n", path);
+		return -1;
+	}
+
+	off = 0;
+	while (off < len) {
+		uint64_t remaining = len - off;
+		size_t want = sizeof(buf);
+		size_t got;
+
+		if ((uint64_t)want > remaining)
+			want = (size_t)remaining;
+		if (ztarget_read(&d->target, addr + off, buf, want) < 0) {
+			printf("read failed at %016llx after %llu bytes\n",
+			    (unsigned long long)(addr + off),
+			    (unsigned long long)total);
+			fclose(fp);
+			return -1;
+		}
+		got = fwrite(buf, 1, want, fp);
+		if (got != want) {
+			printf("write to %s failed after %llu bytes\n",
+			    path, (unsigned long long)(total + got));
+			fclose(fp);
+			return -1;
+		}
+		total += want;
+		off += want;
+	}
+	if (fclose(fp) != 0) {
+		printf("close %s failed after %llu bytes\n",
+		    path, (unsigned long long)total);
+		return -1;
+	}
+	printf("wrote %llu bytes to %s\n",
+	    (unsigned long long)total, path);
+	return 0;
+}
+
+/* --- rf path addr [len] --------------------------------------- */
+static int
+cmd_rf(struct zdbg *d, struct toks *t)
+{
+	struct cmd_qargs a;
+	const char *cmd_line;
+	const char *path;
+	zaddr_t addr;
+	uint64_t len = 0;
+	int have_explicit_len = 0;
+	FILE *fp;
+	uint8_t buf[ZDBG_MEMIO_CHUNK];
+	uint64_t total = 0;
+	int eof_short = 0;
+
+	cmd_line = rest_from(t->orig, 1);
+	if (cmd_qsplit(cmd_line, &a) < 0) {
+		printf("argument list too long\n");
+		return -1;
+	}
+	if (a.n != 2 && a.n != 3) {
+		printf("usage: rf path addr [len]\n");
+		return -1;
+	}
+	path = a.v[0];
+	if (eval_addr(d, a.v[1], &addr) < 0) {
+		printf("bad address\n");
+		return -1;
+	}
+	if (a.n == 3) {
+		if (zexpr_eval(a.v[2], &d->regs, &len) < 0 || len == 0) {
+			printf("bad length\n");
+			return -1;
+		}
+		have_explicit_len = 1;
+	}
+	if (!have_target(d)) {
+		printf("no target\n");
+		return -1;
+	}
+	if (!target_stopped(d)) {
+		printf("no stopped target\n");
+		return -1;
+	}
+
+	fp = fopen(path, "rb");
+	if (fp == NULL) {
+		printf("could not open file: %s\n", path);
+		return -1;
+	}
+
+	for (;;) {
+		size_t want = sizeof(buf);
+		size_t got;
+		size_t written = 0;
+		int rc;
+
+		if (have_explicit_len) {
+			uint64_t remaining = len - total;
+			if (remaining == 0)
+				break;
+			if ((uint64_t)want > remaining)
+				want = (size_t)remaining;
+		}
+		got = fread(buf, 1, want, fp);
+		if (got == 0) {
+			if (have_explicit_len && total < len)
+				eof_short = 1;
+			break;
+		}
+		rc = zdbg_patch_write_chunked(d, addr + total, buf, got,
+		    "rf", &written);
+		total += written;
+		if (rc < 0) {
+			printf("write to target failed after %llu bytes\n",
+			    (unsigned long long)total);
+			fclose(fp);
+			return -1;
+		}
+		if (rc > 0) {
+			printf("patch journal full after %llu bytes written\n",
+			    (unsigned long long)total);
+			fclose(fp);
+			return -1;
+		}
+		if (got < want) {
+			/* short read: file is shorter than requested */
+			if (have_explicit_len && total < len)
+				eof_short = 1;
+			break;
+		}
+	}
+	fclose(fp);
+
+	if (eof_short)
+		printf("wrote %llu bytes from %s to %016llx "
+		    "(EOF before requested %llu bytes)\n",
+		    (unsigned long long)total, path,
+		    (unsigned long long)addr,
+		    (unsigned long long)len);
+	else
+		printf("wrote %llu bytes from %s to %016llx\n",
+		    (unsigned long long)total, path,
+		    (unsigned long long)addr);
+	return 0;
 }
 
 /* --- u --------------------------------------------------------- */
@@ -3662,6 +4144,14 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_f(d, &t);
 	if (strcmp(mn, "s") == 0)
 		return cmd_s(d, &t);
+	if (strcmp(mn, "c") == 0)
+		return cmd_c(d, &t);
+	if (strcmp(mn, "m") == 0)
+		return cmd_m(d, &t);
+	if (strcmp(mn, "wf") == 0)
+		return cmd_wf(d, &t);
+	if (strcmp(mn, "rf") == 0)
+		return cmd_rf(d, &t);
 	if (strcmp(mn, "u") == 0)
 		return cmd_u(d, &t);
 	if (strcmp(mn, "a") == 0)

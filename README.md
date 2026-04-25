@@ -94,16 +94,25 @@ Windows.
   policy and remain debugger-internal.  No SEH chain decoding,
   no C++ exception object decoding, no CLR exception decoding,
   and no Windows source/PDB integration.
-* Patch journal: user memory writes (`e`, `f`, `a`, `pa`, `ij`)
-  are recorded with old/new bytes and can be listed (`pl`),
-  reverted (`pu`), reapplied (`pr`), saved as raw bytes or a
-  simple textual script (`ps`), and, for file-backed mappings,
-  explicitly written back to disk (`pw`) only when the current
-  file bytes still match the recorded old bytes.  Software
-  breakpoint memory writes are not recorded.  The journal is
-  cleared on new launch/attach and kept across detach/kill so
-  patches can still be inspected or saved after the process is
-  gone.
+* Patch journal: user memory writes (`e`, `f`, `a`, `pa`, `ij`,
+  `m`, `rf`) are recorded with old/new bytes and can be listed
+  (`pl`), reverted (`pu`), reapplied (`pr`), saved as raw bytes
+  or a simple textual script (`ps`), and, for file-backed
+  mappings, explicitly written back to disk (`pw`) only when the
+  current file bytes still match the recorded old bytes.
+  Software breakpoint memory writes are not recorded.  The
+  journal is cleared on new launch/attach and kept across
+  detach/kill so patches can still be inspected or saved after
+  the process is gone.  `m` and `rf` are journaled user writes
+  that may produce multiple patch records (one per
+  `ZDBG_PATCH_MAX_BYTES` chunk) and stop with a clear message
+  if the patch journal fills mid-stream.  There is no automatic
+  rollback on partial failure; recorded chunks can still be
+  reverted with `pu`.  `wf` may leave a partial output file if
+  target memory becomes unreadable mid-dump and reports the
+  partial byte count in that case.  `c`, `m`, `wf`, and `rf` do
+  raw bytes only: no loader, relocation, or file-format
+  semantics are applied.
 * No DWARF/PDB, no source-line debugging, no remote debugging.
 * Windows support is younger than Linux support.  No PDB, no
   CodeView, no private/COFF symbols, no WOW64.  Windows
@@ -196,6 +205,12 @@ Run the debugger:
     s -u64 value         little-endian 64-bit value
     s -ptr expr          pointer-sized value of expression
     s -limit N           cap matches (default 64)
+    c addr1 len addr2    compare two memory ranges
+    c -limit N ...       cap differences (default 128)
+    m src len dst        copy/move memory inside target, journaled
+    wf addr len path     write target memory range to host file
+    rf path addr [len]   read host file bytes into target memory,
+                         journaled
     u [addr [count]]     tiny unassemble
     a [addr]             tiny assemble
     pa addr len insn     patch instruction + NOP fill
