@@ -63,9 +63,10 @@ Windows.
   and are distinguished from user single-step via DR6.
   No thread-specific hwbp UI, no WOW64/32-bit target DR
   support.
-* Proceed/step-over (`p`) only supports direct `call rel32`
-  initially.  Indirect calls and complex instruction decoding
-  remain out of scope.
+* Proceed/step-over (`p`) supports x86-64 direct `call rel32`
+  and AArch64 `bl`/`blr` by placing a temporary breakpoint at
+  `pc+next_insn` (x86 next instruction or AArch64 `pc+4`).  Other
+  forms fall back to single-step.
 * Thread awareness: Linux backend tracks multiple traced
   threads, supports `th` list/select, sets
   `PTRACE_O_TRACECLONE` on launch, attaches to every TID under
@@ -434,7 +435,8 @@ is implemented.
     arch                 show selected target architecture
     g                    continue (waits for next stop)
     t                    single step (waits for next stop)
-    p [count]            proceed / step over direct call
+    p [count]            proceed / step over direct call (x86 CALL,
+                         AArch64 BL/BLR; otherwise single-step)
     th [tid|index]       list/select traced thread
     sig                  show pending signal for selected thread
     sig -l               list known signals
@@ -739,11 +741,15 @@ zdbg separates two axes:
   the primary target architecture.  AArch64 has a phase-1 native
   Linux backend that supports launch/attach, memory I/O, integer
   register read/write through `zreg_file`, continue, single-step,
-  and software breakpoints using `BRK #0`; a real AArch64
-  disassembler, assembler, hardware breakpoints/watchpoints, and
-  unwinder are still unimplemented and the corresponding ops fail
-  cleanly with messages like "assembly not supported for
-  architecture aarch64".
+  and software breakpoints using `BRK #0`.  AArch64 disassembly is
+  a phase-1 fixed-width decoder that recognizes common control-flow
+  (`b`/`bl`/`b.cond`/`cbz`/`cbnz`/`tbz`/`tbnz`/`br`/`blr`/`ret`),
+  prologue/epilogue (`stp`/`ldp`/`mov fp,sp`), simple ADD/SUB
+  immediates (and CMP/CMN aliases), `adr`/`adrp`, `nop`/`brk`/
+  `svc`; everything else prints as `.word 0xNNNNNNNN`.  AArch64
+  assembler, hardware breakpoints/watchpoints, and unwinder are
+  still unimplemented and the corresponding ops fail cleanly with
+  messages like "assembly not supported for architecture aarch64".
 
 Generic command, run-control and breakpoint code reaches for
 architecture-specific behavior only through the ops table on
@@ -811,11 +817,15 @@ Limitations of this phase:
 * AArch64 support is native-host only: the Linux backend only
   debugs targets matching its native architecture.  Cross-arch
   debugging is not implemented.
-* AArch64 `u` shows raw words (or "unsupported" diagnostics)
-  because no AArch64 disassembler is wired up yet.  `a`/`pa`
-  are unsupported on AArch64.  `hb`/`hw` are unsupported on
-  AArch64 (DR0..DR7 are x86-64-only; AArch64 hardware debug
-  registers are future work).
+* AArch64 `u` uses a phase-1 fixed-width decoder: common
+  control-flow, prologue/epilogue, and simple integer instructions
+  are decoded; unknown encodings are shown as `.word 0xNNNNNNNN`.
+  The decoder intentionally omits SIMD/FP/SVE, full load/store
+  forms, full data-processing, system instructions beyond basic
+  hint/svc/brk, PAC/BTI semantics, and instruction relocation.
+  `a`/`pa` remain unsupported on AArch64.  `hb`/`hw` are
+  unsupported on AArch64 (DR0..DR7 are x86-64-only; AArch64
+  hardware debug registers are future work).
 * Attach machine detection is not implemented; attach defaults
   to the backend's native architecture.
 
@@ -832,7 +842,8 @@ The legacy x86-64 names (`rip`, `rsp`, etc.) and the
     src/            core implementation
         arch.c          architecture ops registry
         arch_x86_64.c   x86-64 ops (wraps tinyasm/tinydis)
-        arch_aarch64.c  AArch64 stub ops
+        arch_aarch64.c  AArch64 ops (wraps arch_aarch64_dis)
+        arch_aarch64_dis.c  AArch64 phase-1 decoder/disassembler
         regs.c          legacy x86-64 register helpers
         regfile.c       generic integer register-file view
         machine.c       ELF64/PE32+ executable machine detection

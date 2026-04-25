@@ -1,11 +1,13 @@
 /*
- * arch_aarch64.c - AArch64 target architecture stub.
+ * arch_aarch64.c - AArch64 target architecture ops table.
  *
- * This stub exists so the debugger core can compile against a
- * non-x86 ops table and prove the architecture boundary holds.
- * It does not implement real AArch64 decoding, assembly, or
- * register access.  Decode/assemble/invert_jcc and the register
- * accessors all return -1 (unsupported).
+ * Wraps the phase-1 AArch64 disassembler (arch_aarch64_dis.c)
+ * behind the generic `struct zarch_ops` interface and supplies
+ * the breakpoint instruction bytes plus PC-after-trap policy.
+ * Assembly, conditional-jump inversion, register accessors, and
+ * frame-pointer backtrace remain unsupported and return -1; the
+ * register-print/get/set hooks are present but report unsupported
+ * cleanly.
  *
  * The breakpoint instruction is the canonical `BRK #0` little
  * endian encoding, length 4.  The PC-after-trap correction is the
@@ -19,29 +21,10 @@
 #include <string.h>
 
 #include "zdbg_arch.h"
+#include "zdbg_arch_aarch64.h"
 
 /* BRK #0: 0xd4200000, encoded little-endian. */
 static const uint8_t aarch64_brk[4] = { 0x00, 0x00, 0x20, 0xd4 };
-
-static int
-aarch64_decode_one(zaddr_t addr, const uint8_t *buf, size_t buflen,
-    struct zdecode *out)
-{
-	(void)addr;
-	(void)buf;
-	(void)buflen;
-	if (out != NULL)
-		memset(out, 0, sizeof(*out));
-	return -1;
-}
-
-static zaddr_t
-aarch64_fallthrough(const struct zdecode *d)
-{
-	if (d == NULL || d->len == 0)
-		return 0;
-	return d->addr + (zaddr_t)d->len;
-}
 
 static int
 aarch64_assemble_one(zaddr_t addr, const char *line,
@@ -171,8 +154,8 @@ static const struct zarch_ops aarch64_ops = {
 	.name = "aarch64",
 	.breakpoint_bytes = aarch64_brk,
 	.breakpoint_len = sizeof(aarch64_brk),
-	.decode_one = aarch64_decode_one,
-	.fallthrough = aarch64_fallthrough,
+	.decode_one = zaarch64_decode_one,
+	.fallthrough = zaarch64_fallthrough,
 	.assemble_one = aarch64_assemble_one,
 	.assemble_patch = aarch64_assemble_patch,
 	.invert_jcc = aarch64_invert_jcc,

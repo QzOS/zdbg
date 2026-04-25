@@ -29,6 +29,7 @@ int main(void) { return 0; }
 #include <unistd.h>
 
 #include "zdbg_arch.h"
+#include "zdbg_arch_aarch64.h"
 #include "zdbg_regfile.h"
 #include "zdbg_target.h"
 
@@ -106,6 +107,33 @@ main(void)
 		printf("FAIL: SP role unreadable or zero\n");
 		ztarget_kill(&tgt);
 		return 1;
+	}
+
+	/* Decode the instruction at PC to confirm the AArch64 phase-1
+	 * decoder is wired through arch ops on a live target. */
+	{
+		uint8_t ibuf[4];
+		struct zdecode dis;
+		const struct zarch_ops *aops = zarch_get(ZARCH_AARCH64);
+
+		if (aops == NULL || aops->decode_one == NULL) {
+			printf("FAIL: AArch64 decode_one not wired\n");
+			ztarget_kill(&tgt);
+			return 1;
+		}
+		if (ztarget_read(&tgt, (zaddr_t)pc, ibuf,
+		    sizeof(ibuf)) < 0) {
+			printf("FAIL: read PC bytes\n");
+			ztarget_kill(&tgt);
+			return 1;
+		}
+		memset(&dis, 0, sizeof(dis));
+		if (aops->decode_one((zaddr_t)pc, ibuf, sizeof(ibuf),
+		    &dis) < 0 || dis.len != 4) {
+			printf("FAIL: decode_one at PC\n");
+			ztarget_kill(&tgt);
+			return 1;
+		}
 	}
 
 	/* Single-step once. */
