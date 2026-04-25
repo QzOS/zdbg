@@ -57,7 +57,7 @@ aarch64_assemble_patch(zaddr_t addr, size_t patch_len, const char *line,
 	(void)resolve;
 	(void)resolve_arg;
 	if (err != NULL && errcap > 0) {
-		const char *m = "aarch64 patch assembly not supported";
+		const char *m = "AArch64 patch assembly not supported";
 		size_t n = strlen(m);
 		if (n >= errcap)
 			n = errcap - 1;

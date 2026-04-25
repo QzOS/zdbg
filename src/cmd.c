@@ -3720,9 +3720,11 @@ cmd_p_once(struct zdbg *d)
 			at_fallthrough = 1;
 		if (at_fallthrough) {
 			char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+			const char *pcname = (d->arch->pc_reg_name != NULL)
+			    ? d->arch->pc_reg_name : "pc";
 			annot_addr(d, fallthrough, ann, sizeof(ann));
-			printf("stopped: proceed rip=%016llx%s\n",
-			    (unsigned long long)fallthrough, ann);
+			printf("stopped: proceed %s=%016llx%s\n",
+			    pcname, (unsigned long long)fallthrough, ann);
 		} else {
 			zstop_print(d, &st, bp_id);
 		}
