@@ -13,6 +13,7 @@
 #include "zdbg.h"
 #include "zdbg_arch.h"
 #include "zdbg_regs.h"
+#include "zdbg_stdio.h"
 
 enum ztarget_state {
 	ZTARGET_EMPTY = 0,
@@ -95,7 +96,8 @@ struct ztarget {
 void ztarget_init(struct ztarget *t);
 void ztarget_fini(struct ztarget *t);
 
-int ztarget_launch(struct ztarget *t, int argc, char **argv);
+int ztarget_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg);
 int ztarget_attach(struct ztarget *t, uint64_t pid);
 int ztarget_detach(struct ztarget *t);
 int ztarget_kill(struct ztarget *t);
@@ -204,7 +206,8 @@ int ztarget_clear_pending_exception(struct ztarget *t, uint64_t tid);
  * one backend is active per build; src/target.c selects it.
  */
 
-int ztarget_null_launch(struct ztarget *t, int argc, char **argv);
+int ztarget_null_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg);
 int ztarget_null_attach(struct ztarget *t, uint64_t pid);
 int ztarget_null_detach(struct ztarget *t);
 int ztarget_null_kill(struct ztarget *t);
@@ -236,7 +239,8 @@ int ztarget_null_set_pending_exception(struct ztarget *t, uint64_t tid,
 int ztarget_null_clear_pending_exception(struct ztarget *t, uint64_t tid);
 
 #if defined(__linux__)
-int ztarget_linux_launch(struct ztarget *t, int argc, char **argv);
+int ztarget_linux_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg);
 int ztarget_linux_attach(struct ztarget *t, uint64_t pid);
 int ztarget_linux_detach(struct ztarget *t);
 int ztarget_linux_kill(struct ztarget *t);
@@ -278,7 +282,8 @@ int ztarget_linux_clear_pending_exception(struct ztarget *t, uint64_t tid);
 struct zmap_table;
 struct zsym_table;
 
-int ztarget_windows_launch(struct ztarget *t, int argc, char **argv);
+int ztarget_windows_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg);
 int ztarget_windows_attach(struct ztarget *t, uint64_t pid);
 int ztarget_windows_detach(struct ztarget *t);
 int ztarget_windows_kill(struct ztarget *t);

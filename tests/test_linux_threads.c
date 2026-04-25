@@ -114,7 +114,7 @@ main(void)
 	ztarget_init(&tgt);
 	argv[0] = (char *)path;
 	argv[1] = NULL;
-	if (ztarget_launch(&tgt, 1, argv) < 0) {
+	if (ztarget_launch(&tgt, 1, argv, NULL) < 0) {
 		printf("SKIP: launch failed (errno=%d)\n", errno);
 		ztarget_fini(&tgt);
 		return 0;

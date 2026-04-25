@@ -1173,8 +1173,74 @@ ztarget_windows_wait(struct ztarget *t, struct zstop *st)
 
 /* ---------------- launch ---------------- */
 
+/*
+ * Open a HANDLE for one stdio slot.  *opened is set to 1 when
+ * the returned handle was opened by us and must be closed by the
+ * parent after CreateProcess() returns.  Returns INVALID_HANDLE_
+ * VALUE on failure.  is_input selects read vs write semantics.
+ */
+static HANDLE
+zw_open_stdio_handle(const struct zstdio_slot *s, int is_input,
+    int *opened, HANDLE inherited_default)
+{
+	SECURITY_ATTRIBUTES sa;
+	HANDLE h;
+	const char *path;
+	DWORD access;
+	DWORD share;
+	DWORD disp;
+
+	*opened = 0;
+	if (s == NULL || s->mode == ZSTDIO_INHERIT) {
+		/*
+		 * Make the inherited std handle inheritable for the
+		 * child.  Best-effort: failure is non-fatal.
+		 */
+		if (inherited_default != NULL &&
+		    inherited_default != INVALID_HANDLE_VALUE) {
+			(void)SetHandleInformation(inherited_default,
+			    HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+		}
+		return inherited_default;
+	}
+
+	memset(&sa, 0, sizeof(sa));
+	sa.nLength = sizeof(sa);
+	sa.bInheritHandle = TRUE;
+
+	switch (s->mode) {
+	case ZSTDIO_NULL:
+		path = "NUL";
+		break;
+	case ZSTDIO_FILE:
+	case ZSTDIO_CAPTURE:
+		path = s->path;
+		break;
+	default:
+		return INVALID_HANDLE_VALUE;
+	}
+
+	if (is_input) {
+		access = GENERIC_READ;
+		share = FILE_SHARE_READ;
+		disp = OPEN_EXISTING;
+	} else {
+		access = GENERIC_WRITE;
+		share = FILE_SHARE_READ;
+		disp = CREATE_ALWAYS;
+	}
+
+	h = CreateFileA(path, access, share, &sa, disp,
+	    FILE_ATTRIBUTE_NORMAL, NULL);
+	if (h == INVALID_HANDLE_VALUE)
+		return INVALID_HANDLE_VALUE;
+	*opened = 1;
+	return h;
+}
+
 int
-ztarget_windows_launch(struct ztarget *t, int argc, char **argv)
+ztarget_windows_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg)
 {
 	struct zw_target *wt;
 	char *cmdline;
@@ -1182,6 +1248,12 @@ ztarget_windows_launch(struct ztarget *t, int argc, char **argv)
 	PROCESS_INFORMATION pi;
 	BOOL ok;
 	struct zstop st;
+	HANDLE h_in = INVALID_HANDLE_VALUE;
+	HANDLE h_out = INVALID_HANDLE_VALUE;
+	HANDLE h_err = INVALID_HANDLE_VALUE;
+	int opened_in = 0, opened_out = 0, opened_err = 0;
+	int use_handles = 0;
+	BOOL inherit_handles = FALSE;
 
 	if (t == NULL || argc <= 0 || argv == NULL || argv[0] == NULL)
 		return -1;
@@ -1202,17 +1274,64 @@ ztarget_windows_launch(struct ztarget *t, int argc, char **argv)
 	si.cb = sizeof(si);
 	memset(&pi, 0, sizeof(pi));
 
-	ok = CreateProcessA(argv[0], cmdline, NULL, NULL, FALSE,
+	if (stdio_cfg != NULL &&
+	    (stdio_cfg->in.mode != ZSTDIO_INHERIT ||
+	     stdio_cfg->out.mode != ZSTDIO_INHERIT ||
+	     stdio_cfg->err.mode != ZSTDIO_INHERIT))
+		use_handles = 1;
+
+	if (use_handles) {
+		h_in = zw_open_stdio_handle(&stdio_cfg->in, 1,
+		    &opened_in, GetStdHandle(STD_INPUT_HANDLE));
+		h_out = zw_open_stdio_handle(&stdio_cfg->out, 0,
+		    &opened_out, GetStdHandle(STD_OUTPUT_HANDLE));
+		if (stdio_cfg->err.mode == ZSTDIO_STDOUT) {
+			h_err = h_out;
+			opened_err = 0;
+		} else {
+			h_err = zw_open_stdio_handle(&stdio_cfg->err, 0,
+			    &opened_err, GetStdHandle(STD_ERROR_HANDLE));
+		}
+		if (h_in == INVALID_HANDLE_VALUE ||
+		    h_out == INVALID_HANDLE_VALUE ||
+		    h_err == INVALID_HANDLE_VALUE) {
+			if (opened_in && h_in != INVALID_HANDLE_VALUE)
+				CloseHandle(h_in);
+			if (opened_out && h_out != INVALID_HANDLE_VALUE)
+				CloseHandle(h_out);
+			if (opened_err && h_err != INVALID_HANDLE_VALUE)
+				CloseHandle(h_err);
+			free(cmdline);
+			zw_free(t);
+			return -1;
+		}
+		si.dwFlags |= STARTF_USESTDHANDLES;
+		si.hStdInput = h_in;
+		si.hStdOutput = h_out;
+		si.hStdError = h_err;
+		inherit_handles = TRUE;
+	}
+
+	ok = CreateProcessA(argv[0], cmdline, NULL, NULL, inherit_handles,
 	    DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &si, &pi);
 	if (!ok) {
 		/*
 		 * Fallback: let the loader resolve argv[0] from the
 		 * command line.  Useful for bare names on PATH.
 		 */
-		ok = CreateProcessA(NULL, cmdline, NULL, NULL, FALSE,
-		    DEBUG_ONLY_THIS_PROCESS, NULL, NULL, &si, &pi);
+		ok = CreateProcessA(NULL, cmdline, NULL, NULL,
+		    inherit_handles, DEBUG_ONLY_THIS_PROCESS, NULL, NULL,
+		    &si, &pi);
 	}
 	free(cmdline);
+	/* Close handles we opened; child has its own copy. */
+	if (opened_in)
+		CloseHandle(h_in);
+	if (opened_out)
+		CloseHandle(h_out);
+	if (opened_err && stdio_cfg != NULL &&
+	    stdio_cfg->err.mode != ZSTDIO_STDOUT)
+		CloseHandle(h_err);
 	if (!ok) {
 		zw_free(t);
 		return -1;

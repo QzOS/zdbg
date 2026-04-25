@@ -66,7 +66,7 @@ main(void)
 
 	argv_v[0] = path;
 	argv_v[1] = NULL;
-	if (ztarget_launch(&t, 1, argv_v) != 0) {
+	if (ztarget_launch(&t, 1, argv_v, NULL) != 0) {
 		if (errno == EPERM || errno == EACCES) {
 			printf("test_linux_symbols skipped: ptrace denied\n");
 			return 0;

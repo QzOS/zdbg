@@ -1,0 +1,9 @@
+; io-smoke.zdbg - launch target with configured stdio and verify exit.
+;
+; Stdio is supplied by the caller via --stdin/--stdout/--stderr
+; or via `io ...` lines before this script.
+
+l
+g
+check exited 0
+q

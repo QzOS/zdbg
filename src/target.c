@@ -44,9 +44,10 @@ ztarget_fini(struct ztarget *t)
 }
 
 int
-ztarget_launch(struct ztarget *t, int argc, char **argv)
+ztarget_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg)
 {
-	return ZBACKEND(launch)(t, argc, argv);
+	return ZBACKEND(launch)(t, argc, argv, stdio_cfg);
 }
 
 int

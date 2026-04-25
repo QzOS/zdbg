@@ -193,6 +193,14 @@ Run the debugger:
       -q, --quiet          suppress banner and prompts
       -v, --verbose        echo script commands before execution
           --no-init        do not load $HOME/.zdbgrc startup file
+          --stdin PATH     redirect target stdin from PATH
+          --stdout PATH    redirect target stdout to PATH
+          --stderr PATH    redirect target stderr to PATH
+          --capture-stdout configure file-backed stdout capture
+          --capture-stderr configure file-backed stderr capture
+          --null-stdin     send EOF on target stdin
+          --null-stdout    discard target stdout
+          --null-stderr    discard target stderr
       -h, --help           show usage and exit
           --version        show version and exit
           --               end of zdbg options
@@ -306,6 +314,43 @@ A simple smoke and patch script live under
 `examples/scripts/assert-smoke.zdbg` and
 `examples/scripts/assert-patch.zdbg`.
 
+### Target stdio redirection
+
+Launched targets inherit zdbg's stdin/stdout/stderr by default.
+The `io` command and the matching CLI options configure how the
+**next** launch wires up those three handles:
+
+    io stdin  inherit|null|PATH
+    io stdout inherit|null|capture|PATH
+    io stderr inherit|null|capture|stdout|PATH
+    io reset
+    io                       show current configuration
+    io show stdout|stderr [n] print up to n bytes of file/capture
+    io path stdout|stderr     print configured output path
+
+`null` maps to `/dev/null` on POSIX and `NUL` on Windows.
+`capture` allocates a unique file path under `$TMPDIR` (or
+`/tmp`) on POSIX and `GetTempPathA()` on Windows; the path is
+printed when configured and stays accessible via `io path` and
+`io show`.  Capture files are not deleted automatically — they
+are useful artifacts for scripts.  Stderr `stdout` aliases stderr
+to whatever stdout becomes for the launched process.
+
+Equivalent CLI options apply to the first launch performed by a
+script or interactive session:
+
+    --stdin PATH --stdout PATH --stderr PATH
+    --capture-stdout --capture-stderr
+    --null-stdin --null-stdout --null-stderr
+
+Limitations.  The configuration applies to launched targets
+only; `la` (attach) cannot redirect an already-running process's
+stdio.  Capture is file-backed, not live pipe streaming, so
+output buffered inside the target may not appear until the
+target flushes or exits.  No PTY/ConPTY, expect-style matching,
+async output events, or stdin injection into a running process
+is implemented.
+
 ## Command sketch
 
     ?                    help
@@ -395,6 +440,19 @@ A simple smoke and patch script live under
     ex CODE pass|nopass  set pending exception continuation (guarded)
     handle [name [opts]] show/set signal stop/pass/print policy on
                          Linux, or Windows exception policy on Windows
+    io                   show target stdio config
+    io reset             restore inherited stdio
+    io stdin inherit|null|PATH
+                         configure stdin for next launch
+    io stdout inherit|null|capture|PATH
+                         configure stdout for next launch
+    io stderr inherit|null|capture|stdout|PATH
+                         configure stderr for next launch
+    io show stdout|stderr [n]
+                         print captured/file output up to n bytes
+                         (default 4096)
+    io path stdout|stderr
+                         print configured output path; fails if none
     source path          execute commands from script file
     . path                alias for source
     check ...            script-friendly assertion (see below)
