@@ -10,6 +10,10 @@ add_executable(test_arch test_arch.c)
 target_link_libraries(test_arch PRIVATE zdbg_core)
 add_test(NAME test_arch COMMAND test_arch)
 
+add_executable(test_aarch64_dis test_aarch64_dis.c)
+target_link_libraries(test_aarch64_dis PRIVATE zdbg_core)
+add_test(NAME test_aarch64_dis COMMAND test_aarch64_dis)
+
 add_executable(test_tinyasm test_tinyasm.c)
 target_link_libraries(test_tinyasm PRIVATE zdbg_core)
 add_test(NAME test_tinyasm COMMAND test_tinyasm)

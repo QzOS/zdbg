@@ -245,7 +245,6 @@ static int
 test_aarch64_unsupported(void)
 {
 	const struct zarch_ops *a = zarch_get(ZARCH_AARCH64);
-	uint8_t code[4] = { 0x00, 0x00, 0x00, 0x00 };
 	uint8_t buf[16];
 	struct zdecode d;
 	struct zregs r;
@@ -253,11 +252,24 @@ test_aarch64_unsupported(void)
 	size_t out_len = 0;
 	size_t used = 0;
 	char err[64];
+	/* nop = D503 201F little-endian. */
+	const uint8_t nop_bytes[4] = { 0x1f, 0x20, 0x03, 0xd5 };
 
 	memset(&d, 0, sizeof(d));
 	memset(&r, 0, sizeof(r));
 	CHECK(a->decode_one != NULL);
-	CHECK(a->decode_one(0x1000, code, sizeof(code), &d) == -1);
+	/* AArch64 phase-1 decoder: known instructions decode. */
+	CHECK(a->decode_one(0x1000, nop_bytes, sizeof(nop_bytes), &d) == 0);
+	CHECK(d.len == 4);
+	CHECK(d.kind == ZINSN_NOP);
+	CHECK(strstr(d.text, "nop") != NULL);
+	/* Short buffer is a hard error. */
+	memset(&d, 0, sizeof(d));
+	CHECK(a->decode_one(0x1000, nop_bytes, 3, &d) == -1);
+	/* fallthrough is pc + 4 for any decoded AArch64 insn. */
+	memset(&d, 0, sizeof(d));
+	CHECK(a->decode_one(0x1000, nop_bytes, sizeof(nop_bytes), &d) == 0);
+	CHECK(a->fallthrough(&d) == 0x1004);
 
 	err[0] = 0;
 	CHECK(a->assemble_patch != NULL);

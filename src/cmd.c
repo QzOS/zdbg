@@ -3690,9 +3690,11 @@ cmd_p_once(struct zdbg *d)
 		return cmd_run_and_wait(d, 1);
 	}
 
-	/* Only step over direct calls; everything else is plain
-	 * single-step (which goes through the usual bp rearm path). */
-	if (!(dis.kind == ZINSN_CALL && dis.is_call && dis.has_target)) {
+	/* Step over any decoded call.  Direct calls (BL, x86 CALL
+	 * rel32) carry has_target; indirect calls (BLR, CALL r/m)
+	 * do not but still want a breakpoint at fallthrough so the
+	 * call returns into the debugger. */
+	if (!(dis.kind == ZINSN_CALL && dis.is_call)) {
 		return cmd_run_and_wait(d, 1);
 	}
 
@@ -4208,7 +4210,7 @@ cmd_arch(struct zdbg *d, struct toks *t)
 		return 0;
 	}
 	if (a->arch == ZARCH_AARCH64) {
-		printf("arch: %s (decode/assembly unsupported)\n",
+		printf("arch: %s (assembly unsupported)\n",
 		    a->name);
 		return 0;
 	}
