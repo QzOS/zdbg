@@ -279,6 +279,10 @@ REPL keeps running.
                                     (e.g. `check arch x86-64`)
     check reg name value            register equals expression
     check rip expr                  alias for `check reg rip expr`
+                                    (x86-64; use `check pc` in
+                                    portable scripts)
+    check pc expr                   architecture-neutral PC check
+                                    (resolves to `rip` on x86-64)
     check mem addr pattern          memory bytes/string/value match
                                     (raw bytes, -str, -wstr, -u32,
                                      -u64, -ptr same as `s`)
@@ -751,20 +755,52 @@ mutated via `zdbg_set_arch()`, which keeps `d->arch_id`, `d->arch`,
 and the breakpoint table in sync.  A future ELF e_machine / PE
 Machine detection step plugs in there.
 
-Register storage is still x86-64-shaped in this pass: `struct
-zregs` is laid out for x86-64 and the architecture ops expose
-PC/SP/FP through abstract accessors that map to rip/rsp/rbp.
-Commands route basic register operations through architecture
-hooks, but expression register names still follow the current
-x86-64 register set until the future register-file refactor.  A
-real architecture-specific register file would arrive together
-with a real AArch64 backend.
+Register storage is still x86-64-shaped in the OS backends:
+`struct zregs` is laid out for x86-64 and `ztarget_getregs` /
+`ztarget_setregs` still operate on it.  On top of that storage
+zdbg now exposes a generic integer register-file view
+(`struct zreg_file` in `include/zdbg_regfile.h`) used by every
+command and expression evaluator.  The register file consists of
+per-architecture descriptors (name, width, role, writable flag)
+plus current values, and resolves the architecture-neutral role
+aliases `pc`, `sp`, and `fp` (and `ip`, `flags`) through the
+canonical entry without duplicating state.  On x86-64:
+
+    pc -> rip       sp -> rsp       fp -> rbp
+    ip -> rip       flags -> rflags
+
+The expression evaluator and condition evaluator have register-
+file-aware variants (`zexpr_eval_rf`, `zexpr_eval_symbols_rf`,
+`zexpr_eval_value_rf`, `zcond_eval_rf`).  The legacy
+`struct zregs *`-shaped APIs remain as compatibility wrappers
+that build a temporary regfile internally.
+
+Limitations of this phase:
+
+* Only integer registers are represented; no SIMD/FPU/vector
+  registers yet.
+* Backend get/set register APIs (`ztarget_getregs`,
+  `ztarget_setregs`) are still x86-64-shaped internally; a real
+  AArch64 register backend is future work.
+* The AArch64 stub exposes an empty register file; every
+  register lookup fails cleanly.
+
+For portable scripts, prefer the role aliases:
+
+    print pc          works on every supported arch
+    check pc main     architecture-neutral PC check
+    cond b 0 pc == main
+
+The legacy x86-64 names (`rip`, `rsp`, etc.) and the
+`check rip` form remain documented and supported on x86-64.
 
     include/        public headers
     src/            core implementation
         arch.c          architecture ops registry
         arch_x86_64.c   x86-64 ops (wraps tinyasm/tinydis)
         arch_aarch64.c  AArch64 stub ops
+        regs.c          legacy x86-64 register helpers
+        regfile.c       generic integer register-file view
         target.c        OS-agnostic dispatcher
         target_null.c   fallback backend (non-Linux, errors cleanly)
         os_linux/       Linux ptrace backend (real)

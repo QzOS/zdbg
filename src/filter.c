@@ -20,6 +20,7 @@
 
 #include "zdbg_filter.h"
 #include "zdbg_expr.h"
+#include "zdbg_regfile.h"
 
 void
 zfilter_init(struct zstop_filter *f)
@@ -165,9 +166,9 @@ find_operator(const char *s, int *oplenp)
 }
 
 int
-zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
-    const struct zmap_table *maps, const struct zsym_table *syms,
-    int *resultp)
+zcond_eval_rf(const char *s, struct ztarget *t,
+    const struct zreg_file *rf, const struct zmap_table *maps,
+    const struct zsym_table *syms, int *resultp)
 {
 	const char *trimmed;
 	size_t tlen;
@@ -193,11 +194,6 @@ zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
 	if (tlen == 0)
 		return -1;
 
-	/*
-	 * Stash a NUL-terminated, trimmed copy in `tmp` so the
-	 * scan and the operand pointers reference a stable buffer
-	 * that we never overwrite.
-	 */
 	if (tlen >= sizeof(tmp))
 		return -1;
 	memcpy(tmp, trimmed, tlen);
@@ -206,7 +202,7 @@ zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
 	op = find_operator(tmp, &oplen);
 	if (op == NULL) {
 		/* bare expression: nonzero == true */
-		if (zexpr_eval_value(tmp, t, regs, maps, syms, &lhs) < 0)
+		if (zexpr_eval_value_rf(tmp, t, rf, maps, syms, &lhs) < 0)
 			return -1;
 		*resultp = (lhs != 0) ? 1 : 0;
 		return 0;
@@ -224,9 +220,9 @@ zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
 	if (copy_operand(rp, rlen, rhsbuf, sizeof(rhsbuf)) < 0)
 		return -1;
 
-	if (zexpr_eval_value(lhsbuf, t, regs, maps, syms, &lhs) < 0)
+	if (zexpr_eval_value_rf(lhsbuf, t, rf, maps, syms, &lhs) < 0)
 		return -1;
-	if (zexpr_eval_value(rhsbuf, t, regs, maps, syms, &rhs) < 0)
+	if (zexpr_eval_value_rf(rhsbuf, t, rf, maps, syms, &rhs) < 0)
 		return -1;
 
 	rc = 0;
@@ -254,4 +250,18 @@ zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
 
 	*resultp = rc;
 	return 0;
+}
+
+int
+zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    int *resultp)
+{
+	struct zreg_file rf;
+
+	if (regs == NULL)
+		return zcond_eval_rf(s, t, NULL, maps, syms, resultp);
+	if (zregfile_from_zregs(&rf, ZARCH_X86_64, regs) < 0)
+		return -1;
+	return zcond_eval_rf(s, t, &rf, maps, syms, resultp);
 }
