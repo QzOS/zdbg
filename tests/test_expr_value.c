@@ -246,17 +246,14 @@ test_inner_uses_register(void)
 static int
 test_cond_eval_with_deref(void)
 {
-	uint8_t bytes[4] = { 0x0a, 0x00, 0x00, 0x00 };
-	struct fakemem m = { 0x6000, sizeof(bytes), bytes };
 	struct zregs r;
 	int res = 0;
-	(void)m;
 
 	/*
 	 * zcond_eval expects a struct ztarget*; we cannot drive it
 	 * directly with a callback.  Confirm the legacy register
 	 * path still works (no deref) when the target pointer is
-	 * NULL.
+	 * NULL, and that deref forms fail safely without a target.
 	 */
 	zregs_clear(&r);
 	(void)zregs_set_by_name(&r, "rax", 5);
