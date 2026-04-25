@@ -12,6 +12,7 @@
 
 #include "zdbg.h"
 #include "zdbg_arch.h"
+#include "zdbg_regfile.h"
 #include "zdbg_regs.h"
 #include "zdbg_stdio.h"
 
@@ -136,6 +137,23 @@ int ztarget_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_setregs(struct ztarget *t, const struct zregs *r);
 
 /*
+ * Generic register-file access at the target boundary.  These
+ * are the preferred entry points for command-level code; the
+ * legacy struct zregs get/set above remain available for the
+ * x86-64 backend implementations and tests.
+ *
+ * Returns 0 on success and -1 if the backend cannot serve the
+ * requested architecture (e.g. AArch64 today on x86-64-only
+ * backends).  On success ztarget_get_regfile() leaves *rf
+ * populated and ready for use; ztarget_set_regfile() pushes
+ * register writes back to the backend.
+ */
+int ztarget_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf);
+int ztarget_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf);
+
+/*
  * Debug register access.  regno selects DR0..DR7; only DR0..DR3,
  * DR6 and DR7 are actually used by zdbg.  Returns 0 on success
  * and -1 on failure or when the backend/platform does not
@@ -220,6 +238,10 @@ int ztarget_null_write(struct ztarget *t, zaddr_t addr, const void *buf,
 int ztarget_null_flush_icache(struct ztarget *t, zaddr_t addr, size_t len);
 int ztarget_null_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_null_setregs(struct ztarget *t, const struct zregs *r);
+int ztarget_null_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf);
+int ztarget_null_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf);
 int ztarget_null_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
 int ztarget_null_set_debugreg(struct ztarget *t, int regno, uint64_t v);
 int ztarget_null_set_debugreg_all(struct ztarget *t, int regno, uint64_t v);
@@ -253,6 +275,10 @@ int ztarget_linux_write(struct ztarget *t, zaddr_t addr, const void *buf,
 int ztarget_linux_flush_icache(struct ztarget *t, zaddr_t addr, size_t len);
 int ztarget_linux_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_linux_setregs(struct ztarget *t, const struct zregs *r);
+int ztarget_linux_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf);
+int ztarget_linux_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf);
 int ztarget_linux_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
 int ztarget_linux_set_debugreg(struct ztarget *t, int regno, uint64_t v);
 int ztarget_linux_set_debugreg_all(struct ztarget *t, int regno, uint64_t v);
@@ -297,6 +323,10 @@ int ztarget_windows_write(struct ztarget *t, zaddr_t addr, const void *buf,
 int ztarget_windows_flush_icache(struct ztarget *t, zaddr_t addr, size_t len);
 int ztarget_windows_getregs(struct ztarget *t, struct zregs *r);
 int ztarget_windows_setregs(struct ztarget *t, const struct zregs *r);
+int ztarget_windows_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf);
+int ztarget_windows_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf);
 int ztarget_windows_get_debugreg(struct ztarget *t, int regno, uint64_t *vp);
 int ztarget_windows_set_debugreg(struct ztarget *t, int regno, uint64_t v);
 int ztarget_windows_set_debugreg_all(struct ztarget *t, int regno, uint64_t v);

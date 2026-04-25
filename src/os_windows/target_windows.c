@@ -41,6 +41,7 @@
 #include <string.h>
 
 #include "zdbg_target.h"
+#include "zdbg_regfile.h"
 #include "zdbg_maps.h"
 #include "zdbg_symbols.h"
 
@@ -1686,6 +1687,36 @@ ztarget_windows_setregs(struct ztarget *t, const struct zregs *r)
 		return -1;
 	return 0;
 #endif
+}
+
+int
+ztarget_windows_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf)
+{
+	struct zregs zr;
+
+	if (rf == NULL)
+		return -1;
+	if (arch != ZARCH_X86_64)
+		return -1;
+	if (ztarget_windows_getregs(t, &zr) < 0)
+		return -1;
+	return zregfile_from_zregs(rf, arch, &zr);
+}
+
+int
+ztarget_windows_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf)
+{
+	struct zregs zr;
+
+	if (rf == NULL)
+		return -1;
+	if (arch != ZARCH_X86_64)
+		return -1;
+	if (zregfile_to_zregs(rf, &zr) < 0)
+		return -1;
+	return ztarget_windows_setregs(t, &zr);
 }
 
 /* ---------------- debug registers ---------------- */
