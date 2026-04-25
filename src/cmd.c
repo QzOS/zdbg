@@ -161,7 +161,9 @@ print_help(void)
 	    "                       show/list/clear/set pending Windows "
 	    "exception\n"
 	    "  handle [sig [opts]]  show/set signal/exception stop/pass/"
-	    "print policy\n");
+	    "print policy\n"
+	    "  source path          execute commands from script file\n"
+	    "  . path                alias for source\n");
 }
 
 static int
@@ -4060,6 +4062,164 @@ cmd_pw(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- script sourcing ------------------------------------------ */
+
+/*
+ * Return 1 if the line, after leading whitespace, is empty or
+ * starts with a `;`/`#` comment marker.  These lines are
+ * skipped during script execution and verbose echoing.
+ */
+static int
+script_line_is_blank_or_comment(const char *line)
+{
+	const char *p = line;
+
+	while (*p == ' ' || *p == '\t')
+		p++;
+	if (*p == 0 || *p == ';' || *p == '#')
+		return 1;
+	return 0;
+}
+
+/*
+ * Internal: execute commands from `fp`.  `name` is used in
+ * diagnostics (file path or "<stdin>").  See zcmd_source_file()
+ * for return values.
+ */
+static int
+zcmd_source_stream_internal(struct zdbg *d, FILE *fp, const char *name)
+{
+	char line[ZDBG_SCRIPT_LINE_MAX];
+	int lineno = 0;
+	int rc = 0;
+
+	if (d == NULL || fp == NULL || name == NULL)
+		return -2;
+	if (d->source_depth >= ZDBG_MAX_SOURCE_DEPTH) {
+		fprintf(stderr, "source nesting too deep\n");
+		return -2;
+	}
+	d->source_depth++;
+
+	for (;;) {
+		size_t n;
+		int cmd_rc;
+
+		if (fgets(line, sizeof(line), fp) == NULL)
+			break;
+		lineno++;
+		n = strlen(line);
+		/*
+		 * Detect over-long lines: fgets stops at a newline
+		 * or sizeof(line)-1 bytes.  If we filled the buffer
+		 * and did not see a newline, the line was too long.
+		 */
+		if (n == sizeof(line) - 1 && line[n - 1] != '\n') {
+			int ch;
+
+			fprintf(stderr, "%s:%d: line too long\n",
+			    name, lineno);
+			/* Drain the rest of the over-long line. */
+			while ((ch = fgetc(fp)) != EOF && ch != '\n')
+				;
+			d->had_error = 1;
+			rc = -1;
+			break;
+		}
+		while (n > 0 &&
+		    (line[n - 1] == '\n' || line[n - 1] == '\r'))
+			line[--n] = 0;
+
+		if (script_line_is_blank_or_comment(line))
+			continue;
+
+		if (d->verbose)
+			printf("+ %s\n", line);
+
+		cmd_rc = zcmd_exec(d, line);
+		d->last_status = cmd_rc;
+		if (cmd_rc == RC_QUIT) {
+			d->quit_requested = 1;
+			break;
+		}
+		if (cmd_rc != 0) {
+			fprintf(stderr,
+			    "%s:%d: command failed: %s\n",
+			    name, lineno, line);
+			d->had_error = 1;
+			rc = -1;
+			break;
+		}
+		if (d->quit_requested)
+			break;
+	}
+
+	d->source_depth--;
+	return rc;
+}
+
+int
+zcmd_source_file(struct zdbg *d, const char *path)
+{
+	FILE *fp;
+	int rc;
+
+	if (d == NULL || path == NULL)
+		return -2;
+	fp = fopen(path, "r");
+	if (fp == NULL) {
+		fprintf(stderr, "cannot open script: %s\n", path);
+		return -2;
+	}
+	rc = zcmd_source_stream_internal(d, fp, path);
+	fclose(fp);
+	return rc;
+}
+
+int
+zcmd_source_stream(struct zdbg *d, FILE *fp, const char *name)
+{
+	return zcmd_source_stream_internal(d, fp,
+	    name != NULL ? name : "<stream>");
+}
+
+static int
+cmd_source(struct zdbg *d, struct toks *t)
+{
+	struct cmd_qargs a;
+	const char *line;
+
+	if (t->n < 2 && (t->rest == NULL || t->rest[0] == 0)) {
+		printf("usage: source path\n");
+		return -1;
+	}
+	/*
+	 * Re-parse the original line with the quote-aware splitter
+	 * so paths containing spaces survive ("C:\Tmp\my script").
+	 */
+	line = t->orig;
+	while (*line == ' ' || *line == '\t')
+		line++;
+	/* skip the command word ("source" or ".") */
+	while (*line && *line != ' ' && *line != '\t')
+		line++;
+	while (*line == ' ' || *line == '\t')
+		line++;
+	if (*line == 0) {
+		printf("usage: source path\n");
+		return -1;
+	}
+	if (cmd_qsplit(line, &a) < 0) {
+		printf("source: argument too long\n");
+		return -1;
+	}
+	if (a.n < 1) {
+		printf("usage: source path\n");
+		return -1;
+	}
+	return zcmd_source_file(d, a.v[0]) == 0 ? 0 : -1;
+}
+
 /* --- top-level dispatch --------------------------------------- */
 
 void
@@ -4086,6 +4246,12 @@ zdbg_init(struct zdbg *d)
 	d->have_syms = 0;
 	d->stopped_bp = -1;
 	d->stopped_hwbp = -1;
+	d->quit_requested = 0;
+	d->had_error = 0;
+	d->last_status = 0;
+	d->source_depth = 0;
+	d->verbose = 0;
+	d->quiet = 0;
 }
 
 void
@@ -4132,8 +4298,12 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return 0;
 	}
 	if (strcmp(mn, "q") == 0 || strcmp(mn, "quit") == 0 ||
-	    strcmp(mn, "exit") == 0)
+	    strcmp(mn, "exit") == 0) {
+		d->quit_requested = 1;
 		return RC_QUIT;
+	}
+	if (strcmp(mn, "source") == 0 || strcmp(mn, ".") == 0)
+		return cmd_source(d, &t);
 	if (strcmp(mn, "r") == 0)
 		return cmd_r(d, &t);
 	if (strcmp(mn, "d") == 0 || strcmp(mn, "x") == 0)

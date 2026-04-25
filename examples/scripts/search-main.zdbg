@@ -1,0 +1,16 @@
+; search-main.zdbg - launch target, set a breakpoint at `main`,
+; run to it, print registers, and exit.
+;
+; Usage:
+;   zdbg --batch -q -x examples/scripts/search-main.zdbg \
+;       ./build/examples/testprog
+;
+; Requires that the target exposes a `main` symbol (the example
+; testprog is built with -g and keeps .symtab on Linux).
+
+l
+b main
+g
+r
+bt
+q

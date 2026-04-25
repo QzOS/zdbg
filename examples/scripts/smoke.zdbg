@@ -1,0 +1,12 @@
+; smoke.zdbg - tiny zdbg smoke script.
+;
+; Usage:
+;   zdbg --batch -q -x examples/scripts/smoke.zdbg ./build/examples/testprog
+;
+; The target path must be supplied on the command line; bare `l`
+; relaunches whatever was named there.
+
+l
+lm
+sym main
+q

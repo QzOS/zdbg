@@ -54,6 +54,10 @@ add_executable(test_memio test_memio.c)
 target_link_libraries(test_memio PRIVATE zdbg_core)
 add_test(NAME test_memio COMMAND test_memio)
 
+add_executable(test_cmd_script test_cmd_script.c)
+target_link_libraries(test_cmd_script PRIVATE zdbg_core)
+add_test(NAME test_cmd_script COMMAND test_cmd_script)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_linux_target test_linux_target.c)
     target_link_libraries(test_linux_target PRIVATE zdbg_core)
