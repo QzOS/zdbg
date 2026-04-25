@@ -295,6 +295,28 @@ test_aarch64_unsupported(void)
 	return 0;
 }
 
+/*
+ * Verify the host/backend support helper agrees with the active
+ * compile-time backend.  Only the native architecture is
+ * supported; cross-architecture debugging is rejected.
+ */
+static int
+test_backend_supports_arch(void)
+{
+	CHECK(zdbg_backend_supports_arch(ZARCH_NONE) == 0);
+#if defined(__linux__) && defined(__aarch64__)
+	CHECK(zdbg_backend_supports_arch(ZARCH_AARCH64) == 1);
+	CHECK(zdbg_backend_supports_arch(ZARCH_X86_64) == 0);
+#elif defined(__linux__) && defined(__x86_64__)
+	CHECK(zdbg_backend_supports_arch(ZARCH_X86_64) == 1);
+	CHECK(zdbg_backend_supports_arch(ZARCH_AARCH64) == 0);
+#elif defined(_WIN32)
+	CHECK(zdbg_backend_supports_arch(ZARCH_X86_64) == 1);
+	CHECK(zdbg_backend_supports_arch(ZARCH_AARCH64) == 0);
+#endif
+	return 0;
+}
+
 int
 main(void)
 {
@@ -307,6 +329,7 @@ main(void)
 	if (test_x86_reg_hooks()) return 1;
 	if (test_aarch64_breakpoint()) return 1;
 	if (test_aarch64_unsupported()) return 1;
+	if (test_backend_supports_arch()) return 1;
 	printf("test_arch ok\n");
 	return 0;
 }

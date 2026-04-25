@@ -4208,8 +4208,8 @@ cmd_arch(struct zdbg *d, struct toks *t)
 		return 0;
 	}
 	if (a->arch == ZARCH_AARCH64) {
-		printf("arch: %s (stub; decode/assembly/registers"
-		    " unsupported)\n", a->name);
+		printf("arch: %s (decode/assembly unsupported)\n",
+		    a->name);
 		return 0;
 	}
 	printf("arch: %s\n", a->name);
@@ -4280,10 +4280,12 @@ cmd_l(struct zdbg *d, struct toks *t)
 
 	/*
 	 * Inspect the executable's machine type up front so we
-	 * never silently launch an AArch64 (or otherwise
-	 * unsupported) binary into our x86-64 backend.  Detection
-	 * failure on the path is non-fatal here; only an explicit
-	 * unsupported architecture is rejected.
+	 * never silently launch an unsupported binary into the
+	 * active backend.  Cross-architecture debugging is not
+	 * implemented: the backend only supports its native
+	 * architecture.  Detection failure on the path is
+	 * non-fatal here; only an explicit unsupported
+	 * architecture is rejected.
 	 */
 	{
 		enum zarch detected = ZARCH_NONE;
@@ -4294,14 +4296,15 @@ cmd_l(struct zdbg *d, struct toks *t)
 		drc = zmachine_detect_file(argv[0], &detected,
 		    errbuf, sizeof(errbuf));
 		if (drc == 0) {
-			if (detected != ZARCH_X86_64) {
+			if (!zdbg_backend_supports_arch(detected)) {
 				const struct zarch_ops *ops =
 				    zarch_get(detected);
 				const char *nm = (ops && ops->name) ?
 				    ops->name : "(unknown)";
 				printf("unsupported target architecture: "
-				    "%s (backend registers/control not "
-				    "implemented yet)\n", nm);
+				    "%s on this backend/host "
+				    "(cross-architecture debugging is "
+				    "not implemented)\n", nm);
 				return -1;
 			}
 			if (zdbg_set_arch(d, detected) < 0) {

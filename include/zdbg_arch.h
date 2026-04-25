@@ -219,10 +219,20 @@ const struct zarch_ops *zarch_aarch64(void);
 int zdbg_set_arch(struct zdbg *d, enum zarch arch);
 
 /*
- * Pick the target architecture for the current backend.  Today
- * both supported OS backends are x86-64-only, so this always
- * selects ZARCH_X86_64.  Returns 0 on success, -1 on error.
+ * Pick the target architecture for the current backend.  When a
+ * target has been launched/attached, prefer the architecture the
+ * OS backend reported (`d->target.arch`).  Otherwise fall back
+ * to the backend's native architecture.  Returns 0 on success,
+ * -1 on error.
  */
 int zdbg_select_arch_for_target(struct zdbg *d);
+
+/*
+ * Returns 1 if the active backend can debug a target of the
+ * given architecture, 0 otherwise.  Today every backend supports
+ * only its native architecture: cross-architecture debugging is
+ * not implemented.
+ */
+int zdbg_backend_supports_arch(enum zarch arch);
 
 #endif /* ZDBG_ARCH_H */

@@ -65,12 +65,36 @@
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #if defined(__x86_64__)
 #include <sys/user.h>
 #endif
+
+#if defined(__aarch64__)
+/*
+ * NT_PRSTATUS is the regset id for the AArch64 user_pt_regs view
+ * exposed by Linux ptrace.  <linux/elf.h> would provide it, but
+ * pulling kernel headers is fragile across distros, so define a
+ * conservative fallback.
+ */
+#ifndef NT_PRSTATUS
+#define NT_PRSTATUS 1
+#endif
+
+/*
+ * Backend-private mirror of `struct user_pt_regs` (asm/ptrace.h).
+ * Defined locally to avoid pulling in kernel headers.
+ */
+struct zl_aarch64_regs {
+	uint64_t regs[31];
+	uint64_t sp;
+	uint64_t pc;
+	uint64_t pstate;
+};
+#endif /* __aarch64__ */
 
 #include "zdbg_target.h"
 #include "zdbg_regfile.h"
@@ -88,6 +112,19 @@
  */
 #ifndef PTRACE_EVENT_CLONE
 #define PTRACE_EVENT_CLONE 3
+#endif
+
+/*
+ * Native target architecture for this build.  The Linux ptrace
+ * backend only debugs native processes; cross-architecture
+ * debugging is not implemented.
+ */
+#if defined(__x86_64__)
+#define ZL_NATIVE_ARCH ZARCH_X86_64
+#elif defined(__aarch64__)
+#define ZL_NATIVE_ARCH ZARCH_AARCH64
+#else
+#define ZL_NATIVE_ARCH ZARCH_NONE
 #endif
 
 #define ZL_MAX_THREADS ZDBG_MAX_THREADS
@@ -514,7 +551,7 @@ ztarget_linux_launch(struct ztarget *t, int argc, char **argv,
 
 	t->pid = (uint64_t)pid;
 	t->tid = (uint64_t)pid;
-	t->arch = ZARCH_X86_64;
+	t->arch = ZL_NATIVE_ARCH;
 	t->state = ZTARGET_STOPPED;
 	return 0;
 }
@@ -570,7 +607,7 @@ ztarget_linux_attach(struct ztarget *t, uint64_t pid)
 
 	t->pid = (uint64_t)p;
 	t->tid = (uint64_t)th->tid;
-	t->arch = ZARCH_X86_64;
+	t->arch = ZL_NATIVE_ARCH;
 	t->state = ZTARGET_STOPPED;
 	return 0;
 }
@@ -888,13 +925,25 @@ ztarget_linux_wait(struct ztarget *t, struct zstop *st)
 	t->tid = st->tid;
 	t->state = ZTARGET_STOPPED;
 
-	/* Fill RIP for the stopping thread. */
+	/* Fill PC of the stopping thread. */
 #if defined(__x86_64__)
 	{
 		struct user_regs_struct u;
 		if (ptrace(PTRACE_GETREGS, (pid_t)st->tid, (void *)0,
 		    &u) == 0)
 			st->addr = (uint64_t)u.rip;
+	}
+#elif defined(__aarch64__)
+	{
+		struct zl_aarch64_regs r;
+		struct iovec iov;
+
+		memset(&r, 0, sizeof(r));
+		iov.iov_base = &r;
+		iov.iov_len = sizeof(r);
+		if (ptrace(PTRACE_GETREGSET, (pid_t)st->tid,
+		    (void *)NT_PRSTATUS, &iov) == 0)
+			st->addr = (uint64_t)r.pc;
 	}
 #endif
 	return 0;
@@ -1264,34 +1313,140 @@ ztarget_linux_set_debugreg_all(struct ztarget *t, int regno, uint64_t v)
 
 /* ---------------- generic regfile wrappers ---------------- */
 
+#if defined(__aarch64__)
+
+static int
+zl_aarch64_getregs(pid_t tid, struct zl_aarch64_regs *r)
+{
+	struct iovec iov;
+
+	memset(r, 0, sizeof(*r));
+	iov.iov_base = r;
+	iov.iov_len = sizeof(*r);
+	if (ptrace(PTRACE_GETREGSET, tid, (void *)NT_PRSTATUS,
+	    &iov) < 0)
+		return -1;
+	return 0;
+}
+
+static int
+zl_aarch64_setregs(pid_t tid, const struct zl_aarch64_regs *r)
+{
+	struct iovec iov;
+
+	iov.iov_base = (void *)(const void *)r;
+	iov.iov_len = sizeof(*r);
+	if (ptrace(PTRACE_SETREGSET, tid, (void *)NT_PRSTATUS,
+	    &iov) < 0)
+		return -1;
+	return 0;
+}
+
+/*
+ * Map the AArch64 register snapshot into the canonical zreg_file
+ * descriptor order: x0..x30, sp, pc, pstate.
+ */
+static void
+zl_aarch64_to_regfile(const struct zl_aarch64_regs *r,
+    struct zreg_file *rf)
+{
+	int i;
+
+	for (i = 0; i < 31; i++) {
+		rf->val[i].value = r->regs[i];
+		rf->val[i].valid = 1;
+	}
+	rf->val[31].value = r->sp;
+	rf->val[31].valid = 1;
+	rf->val[32].value = r->pc;
+	rf->val[32].valid = 1;
+	rf->val[33].value = r->pstate;
+	rf->val[33].valid = 1;
+}
+
+static void
+zl_aarch64_from_regfile(const struct zreg_file *rf,
+    struct zl_aarch64_regs *r)
+{
+	int i;
+
+	for (i = 0; i < 31; i++)
+		r->regs[i] = rf->val[i].value;
+	r->sp = rf->val[31].value;
+	r->pc = rf->val[32].value;
+	r->pstate = rf->val[33].value;
+}
+
+#endif /* __aarch64__ */
+
 int
 ztarget_linux_get_regfile(struct ztarget *t, enum zarch arch,
     struct zreg_file *rf)
 {
-	struct zregs zr;
-
 	if (rf == NULL)
 		return -1;
-	if (arch != ZARCH_X86_64)
-		return -1;
-	if (ztarget_linux_getregs(t, &zr) < 0)
-		return -1;
-	return zregfile_from_zregs(rf, arch, &zr);
+#if defined(__x86_64__)
+	if (arch == ZARCH_X86_64) {
+		struct zregs zr;
+
+		if (ztarget_linux_getregs(t, &zr) < 0)
+			return -1;
+		return zregfile_from_zregs(rf, arch, &zr);
+	}
+#endif
+#if defined(__aarch64__)
+	if (arch == ZARCH_AARCH64) {
+		struct zlinux_target *lt = zl_get(t);
+		struct zl_aarch64_regs r;
+
+		if (lt == NULL)
+			return -1;
+		if (zl_aarch64_getregs(lt->current_tid, &r) < 0)
+			return -1;
+		zregfile_init(rf, arch);
+		zl_aarch64_to_regfile(&r, rf);
+		return 0;
+	}
+#endif
+	(void)t;
+	(void)arch;
+	return -1;
 }
 
 int
 ztarget_linux_set_regfile(struct ztarget *t, enum zarch arch,
     const struct zreg_file *rf)
 {
-	struct zregs zr;
-
 	if (rf == NULL)
 		return -1;
-	if (arch != ZARCH_X86_64)
-		return -1;
-	if (zregfile_to_zregs(rf, &zr) < 0)
-		return -1;
-	return ztarget_linux_setregs(t, &zr);
+#if defined(__x86_64__)
+	if (arch == ZARCH_X86_64) {
+		struct zregs zr;
+
+		if (zregfile_to_zregs(rf, &zr) < 0)
+			return -1;
+		return ztarget_linux_setregs(t, &zr);
+	}
+#endif
+#if defined(__aarch64__)
+	if (arch == ZARCH_AARCH64) {
+		struct zlinux_target *lt = zl_get(t);
+		struct zl_aarch64_regs r;
+
+		if (lt == NULL)
+			return -1;
+		/* Read current regset first so any unchanged fields
+		 * round-trip even if the regfile carries no value
+		 * for them (e.g. invalid entries). */
+		if (zl_aarch64_getregs(lt->current_tid, &r) < 0)
+			return -1;
+		zl_aarch64_from_regfile(rf, &r);
+		return zl_aarch64_setregs(lt->current_tid, &r);
+	}
+#endif
+	(void)t;
+	(void)arch;
+	return -1;
 }
 
 /* ---------------- thread API ---------------- */

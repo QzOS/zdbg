@@ -204,24 +204,102 @@ test_roles(void)
 }
 
 static void
-test_aarch64_stub(void)
+test_aarch64_descriptors_and_aliases(void)
 {
 	struct zreg_file rf;
 	uint64_t v = 0;
+	const char *n;
+	int i;
 
 	zregfile_init(&rf, ZARCH_AARCH64);
 	EXPECT_EQ(rf.arch, ZARCH_AARCH64);
-	EXPECT_EQ(rf.count, 0);
-	EXPECT_FAIL(zregfile_get(&rf, "pc", &v));
-	EXPECT_FAIL(zregfile_get(&rf, "x0", &v));
-	EXPECT_FAIL(zregfile_set(&rf, "x0", 0));
-	EXPECT_FAIL(zregfile_get_role(&rf, ZREG_ROLE_PC, &v));
-	if (zregfile_role_name(&rf, ZREG_ROLE_PC) != NULL) {
-		fprintf(stderr, "FAIL %s: AArch64 PC name not NULL\n",
-		    __func__);
+	/* x0..x30 (31) + sp + pc + pstate = 34 */
+	EXPECT_EQ(rf.count, 34);
+	EXPECT_EQ(rf.desc_count, 34);
+	if (rf.desc == NULL || rf.aliases == NULL) {
+		fprintf(stderr, "FAIL %s: NULL desc/aliases\n", __func__);
 		failures++;
 	}
-	/* should not crash */
+
+	/* Populate every descriptor with a recognizable value. */
+	for (i = 0; i < rf.desc_count; i++) {
+		rf.val[i].value = 0x100 + (uint64_t)i;
+		rf.val[i].valid = 1;
+	}
+
+	/* Canonical names. */
+	EXPECT_OK(zregfile_get(&rf, "x0", &v));
+	EXPECT_EQ(v, 0x100ULL);
+	EXPECT_OK(zregfile_get(&rf, "x29", &v));
+	EXPECT_EQ(v, 0x100ULL + 29);
+	EXPECT_OK(zregfile_get(&rf, "x30", &v));
+	EXPECT_EQ(v, 0x100ULL + 30);
+	EXPECT_OK(zregfile_get(&rf, "sp", &v));
+	EXPECT_EQ(v, 0x100ULL + 31);
+	EXPECT_OK(zregfile_get(&rf, "pc", &v));
+	EXPECT_EQ(v, 0x100ULL + 32);
+	EXPECT_OK(zregfile_get(&rf, "pstate", &v));
+	EXPECT_EQ(v, 0x100ULL + 33);
+
+	/* Aliases. */
+	EXPECT_OK(zregfile_get(&rf, "fp", &v));
+	EXPECT_EQ(v, 0x100ULL + 29);
+	EXPECT_OK(zregfile_get(&rf, "lr", &v));
+	EXPECT_EQ(v, 0x100ULL + 30);
+	EXPECT_OK(zregfile_get(&rf, "ip", &v));
+	EXPECT_EQ(v, 0x100ULL + 32);
+
+	/* Roles. */
+	EXPECT_OK(zregfile_get_role(&rf, ZREG_ROLE_PC, &v));
+	EXPECT_EQ(v, 0x100ULL + 32);
+	EXPECT_OK(zregfile_get_role(&rf, ZREG_ROLE_SP, &v));
+	EXPECT_EQ(v, 0x100ULL + 31);
+	EXPECT_OK(zregfile_get_role(&rf, ZREG_ROLE_FP, &v));
+	EXPECT_EQ(v, 0x100ULL + 29);
+
+	n = zregfile_role_name(&rf, ZREG_ROLE_PC);
+	if (n == NULL || strcmp(n, "pc") != 0) {
+		fprintf(stderr, "FAIL %s PC name=%s\n", __func__,
+		    n ? n : "(null)");
+		failures++;
+	}
+	n = zregfile_role_name(&rf, ZREG_ROLE_SP);
+	if (n == NULL || strcmp(n, "sp") != 0) {
+		fprintf(stderr, "FAIL %s SP name=%s\n", __func__,
+		    n ? n : "(null)");
+		failures++;
+	}
+	n = zregfile_role_name(&rf, ZREG_ROLE_FP);
+	if (n == NULL || strcmp(n, "x29") != 0) {
+		fprintf(stderr, "FAIL %s FP name=%s\n", __func__,
+		    n ? n : "(null)");
+		failures++;
+	}
+
+	/* Writes via canonical, role and alias must all reach the
+	 * same canonical descriptor. */
+	EXPECT_OK(zregfile_set(&rf, "x0", 0xAA));
+	EXPECT_OK(zregfile_get(&rf, "x0", &v));
+	EXPECT_EQ(v, 0xAAULL);
+	EXPECT_OK(zregfile_set_role(&rf, ZREG_ROLE_PC, 0xBB));
+	EXPECT_OK(zregfile_get(&rf, "pc", &v));
+	EXPECT_EQ(v, 0xBBULL);
+	EXPECT_OK(zregfile_set(&rf, "fp", 0xCC));
+	EXPECT_OK(zregfile_get(&rf, "x29", &v));
+	EXPECT_EQ(v, 0xCCULL);
+
+	/* Unknown register still fails. */
+	EXPECT_FAIL(zregfile_get(&rf, "x31", &v));
+	EXPECT_FAIL(zregfile_get(&rf, "rax", &v));
+
+	/* zregs adapter is x86-64-only: AArch64 must reject. */
+	{
+		struct zregs zr;
+		zregs_clear(&zr);
+		EXPECT_FAIL(zregfile_to_zregs(&rf, &zr));
+	}
+
+	/* Print should not crash on a populated regfile. */
 	zregfile_print(&rf);
 }
 
@@ -304,7 +382,7 @@ main(void)
 	test_get_set();
 	test_aliases();
 	test_roles();
-	test_aarch64_stub();
+	test_aarch64_descriptors_and_aliases();
 	test_print_does_not_crash();
 	test_expr_rf();
 	test_cond_rf();
