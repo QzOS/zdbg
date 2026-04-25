@@ -277,7 +277,9 @@ REPL keeps running.
     check map expr                  address belongs to a known map/region
     check patch id applied|reverted patch state matches
     check bp id enabled|disabled|installed|removed
+    check bp id hits N|ignore N|cond none|EXPR
     check hwbp id enabled|disabled
+    check hwbp id hits N|ignore N|cond none|EXPR
     check file path exists          host file exists (quoted paths ok)
     check file path size n          host file is exactly n bytes long
     assert ...                      alias for check
@@ -350,6 +352,11 @@ A simple smoke and patch script live under
     hc n|*               clear hardware breakpoint/watchpoint
     hd n                 disable hardware slot
     he n                 enable hardware slot
+    cond b|h id expr     set breakpoint/watchpoint condition
+    cond b|h id clear    clear condition
+    ignore b|h id count  ignore next count hits
+    hits b|h id [reset]  show/reset hit count
+    hits b|h * reset     reset every breakpoint of that kind
     lm [-m|-r] [addr]    list maps/regions or show containing entry
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
     addr expr            show address, nearest symbol, containing map
@@ -451,6 +458,43 @@ the internal single-step + reinstall, another thread can run
 briefly over the uninstalled byte.  Fixing this properly
 requires a stronger all-stop guarantee than the current
 backend provides.
+
+Breakpoint and watchpoint stop filters add hit counts, ignore
+counts, and a tiny condition expression to existing software
+breakpoints and hardware breakpoints/watchpoints.  Condition
+grammar (no parentheses, no boolean operators, no memory
+dereference):
+
+    EXPR
+    EXPR == EXPR
+    EXPR != EXPR
+    EXPR <  EXPR
+    EXPR <= EXPR
+    EXPR >  EXPR
+    EXPR >= EXPR
+
+Each `EXPR` is the same address-expression vocabulary used by
+commands: numbers (default hex), `#decimal`, registers,
+`module:symbol`, `module+offset`, `register+offset`.
+Comparisons are unsigned 64-bit.  A bare `EXPR` is true when
+its value is nonzero.
+
+Hit counts increment for every zdbg-owned software breakpoint,
+hardware execute breakpoint, and data watchpoint hit, including
+hits suppressed by ignore count or condition.  Ignore counts
+are consumed before conditions are evaluated.  Condition-false
+hits auto-continue.  Software breakpoints still perform the
+normal restore / single-step / reinsert dance before
+continuing.  Clearing a breakpoint/watchpoint (`bc`, `hc`)
+also clears its filter; disabling/enabling preserves it.  A
+conservative auto-continue limit (100000 ignored/false hits per
+`g`/`t`/`p` command) guards against pathological conditions on
+hot code.  If condition parsing or evaluation fails the
+debugger stops with a diagnostic instead of silently running.
+
+Limitations: no boolean operators (`&&`, `||`), no parentheses,
+no memory dereference in conditions, no command lists, no
+thread-specific conditions.
 
 Patch persistence (`pw`) writes raw file bytes only.  It does
 not update ELF/PE metadata, relocations, checksums, signatures,

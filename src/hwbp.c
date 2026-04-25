@@ -99,6 +99,7 @@ zhwbp_alloc(struct zhwbp_table *ht, zaddr_t addr,
 			ht->bp[i].kind = kind;
 			ht->bp[i].addr = addr;
 			ht->bp[i].len = len;
+			zfilter_init(&ht->bp[i].filter);
 			return i;
 		}
 	}

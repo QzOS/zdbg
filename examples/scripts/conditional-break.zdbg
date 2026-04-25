@@ -1,0 +1,19 @@
+; conditional-break.zdbg
+;
+; Demonstrates the breakpoint stop-filter feature: hit counts,
+; ignore counts, and a tiny condition expression.  This script
+; is illustrative; it expects the target to provide a visible
+; repeated function symbol named `tick`.  The bundled testprog
+; does not currently contain such a function, so this script is
+; primarily an example for users with their own targets.
+;
+; Run with: zdbg -b -p ./mytarget < conditional-break.zdbg
+;
+l
+b tick
+ignore b 0 #2
+cond b 0 rip == tick
+g
+check stop breakpoint
+check bp 0 hits #3
+q

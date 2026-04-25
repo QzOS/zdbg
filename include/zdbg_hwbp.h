@@ -23,6 +23,7 @@
 
 #include "zdbg.h"
 #include "zdbg_target.h"
+#include "zdbg_filter.h"
 
 #define ZDBG_MAX_HWBP 4
 
@@ -43,6 +44,7 @@ struct zhwbp {
 	enum zhwbp_kind kind;
 	zaddr_t addr;
 	int len;
+	struct zstop_filter filter;
 };
 
 struct zhwbp_table {
