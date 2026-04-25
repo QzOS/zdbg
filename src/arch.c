@@ -13,6 +13,7 @@
 #include "zdbg_arch.h"
 #include "zdbg_bp.h"
 #include "zdbg_cmd.h"
+#include "zdbg_regfile.h"
 
 const struct zarch_ops *
 zarch_get(enum zarch arch)
@@ -43,6 +44,10 @@ zdbg_set_arch(struct zdbg *d, enum zarch arch)
 	/* Reinitialize the breakpoint table so it picks up the new
 	 * arch-owned breakpoint bytes/length. */
 	zbp_table_init(&d->bps, d->arch);
+	/* Initialize the generic register-file view for this arch.
+	 * Values become valid once refresh_regs() runs. */
+	zregfile_init(&d->regfile, arch);
+	d->have_regfile = 0;
 	return 0;
 }
 

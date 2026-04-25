@@ -24,6 +24,7 @@
 #include "zdbg.h"
 #include "zdbg_regs.h"
 
+struct zreg_file;
 struct zmap_table;
 struct zsym_table;
 struct ztarget;
@@ -79,6 +80,15 @@ void zfilter_reset_hits(struct zstop_filter *f);
  */
 int  zcond_eval(const char *s, struct ztarget *t,
     const struct zregs *regs, const struct zmap_table *maps,
+    const struct zsym_table *syms, int *resultp);
+
+/*
+ * Register-file aware variant of zcond_eval(): resolves register
+ * names through the generic register file rather than the legacy
+ * x86-64 `struct zregs`.  Recommended for new callers.
+ */
+int  zcond_eval_rf(const char *s, struct ztarget *t,
+    const struct zreg_file *rf, const struct zmap_table *maps,
     const struct zsym_table *syms, int *resultp);
 
 #endif /* ZDBG_FILTER_H */

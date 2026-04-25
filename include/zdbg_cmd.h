@@ -13,6 +13,7 @@
 #include "zdbg_bp.h"
 #include "zdbg_hwbp.h"
 #include "zdbg_regs.h"
+#include "zdbg_regfile.h"
 #include "zdbg_maps.h"
 #include "zdbg_signal.h"
 #include "zdbg_exception.h"
@@ -27,6 +28,7 @@ struct zdbg {
 	struct zbp_table bps;
 	struct zhwbp_table hwbps;
 	struct zregs regs;
+	struct zreg_file regfile;
 	struct zmap_table maps;
 	struct zmap_table regions;
 	struct zsym_table syms;
@@ -36,6 +38,7 @@ struct zdbg {
 	zaddr_t dump_addr;
 	zaddr_t asm_addr;
 	int have_regs;
+	int have_regfile;
 	int have_maps;
 	int have_regions;
 	int have_syms;

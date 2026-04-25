@@ -26,6 +26,7 @@
 
 #include "zdbg_expr.h"
 #include "zdbg_maps.h"
+#include "zdbg_regfile.h"
 #include "zdbg_symbols.h"
 #include "zdbg_target.h"
 
@@ -60,7 +61,7 @@ hexval(int c)
  * Returns 0 on success, -1 on failure.
  */
 static int
-parse_term(const char **pp, const struct zregs *regs, uint64_t *out)
+parse_term(const char **pp, const struct zreg_file *rf, uint64_t *out)
 {
 	const char *p = *pp;
 	const char *start;
@@ -164,7 +165,7 @@ parse_term(const char **pp, const struct zregs *regs, uint64_t *out)
 	}
 
 	/* register */
-	if (regs != NULL && zregs_get_by_name(regs, buf, &v) == 0) {
+	if (rf != NULL && zregfile_get(rf, buf, &v) == 0) {
 		*out = v;
 		*pp = p;
 		return 0;
@@ -174,7 +175,7 @@ parse_term(const char **pp, const struct zregs *regs, uint64_t *out)
 }
 
 int
-zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out)
+zexpr_eval_rf(const char *s, const struct zreg_file *rf, zaddr_t *out)
 {
 	const char *p;
 	uint64_t lhs = 0;
@@ -185,7 +186,7 @@ zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out)
 		return -1;
 	p = s;
 
-	if (parse_term(&p, regs, &lhs) < 0)
+	if (parse_term(&p, rf, &lhs) < 0)
 		return -1;
 
 	while (*p == ' ' || *p == '\t')
@@ -202,7 +203,7 @@ zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out)
 		return -1;
 	}
 
-	if (parse_term(&p, regs, &rhs) < 0)
+	if (parse_term(&p, rf, &rhs) < 0)
 		return -1;
 
 	while (*p == ' ' || *p == '\t')
@@ -215,6 +216,35 @@ zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out)
 	else
 		*out = lhs - rhs;
 	return 0;
+}
+
+/*
+ * Build a temporary x86-64 register file from a legacy
+ * `struct zregs` so the legacy zexpr_eval(...) entry points can
+ * delegate to the regfile-aware implementation without having
+ * to know an architecture id.  Uses the standard x86-64
+ * descriptor table because that is what `struct zregs` mirrors.
+ */
+static int
+build_legacy_rf(struct zreg_file *rf, const struct zregs *regs)
+{
+	if (regs == NULL) {
+		zregfile_init(rf, ZARCH_NONE);
+		return 0;
+	}
+	return zregfile_from_zregs(rf, ZARCH_X86_64, regs);
+}
+
+int
+zexpr_eval(const char *s, const struct zregs *regs, zaddr_t *out)
+{
+	struct zreg_file rf;
+
+	if (regs == NULL)
+		return zexpr_eval_rf(s, NULL, out);
+	if (build_legacy_rf(&rf, regs) < 0)
+		return -1;
+	return zexpr_eval_rf(s, &rf, out);
 }
 
 /* --- map-aware evaluator --------------------------------------- */
@@ -324,7 +354,7 @@ token_to_number(const char *buf, size_t n, uint64_t *out)
 }
 
 static int
-parse_term_maps(const char **pp, const struct zregs *regs,
+parse_term_maps(const char **pp, const struct zreg_file *rf,
     const struct zmap_table *maps, uint64_t *out)
 {
 	const char *p = *pp;
@@ -405,7 +435,7 @@ parse_term_maps(const char **pp, const struct zregs *regs,
 	}
 
 	/* register? */
-	if (regs != NULL && zregs_get_by_name(regs, buf, &v) == 0) {
+	if (rf != NULL && zregfile_get(rf, buf, &v) == 0) {
 		*out = v;
 		*pp = p;
 		return 0;
@@ -429,7 +459,7 @@ parse_term_maps(const char **pp, const struct zregs *regs,
 }
 
 int
-zexpr_eval_maps(const char *s, const struct zregs *regs,
+zexpr_eval_maps_rf(const char *s, const struct zreg_file *rf,
     const struct zmap_table *maps, zaddr_t *out)
 {
 	const char *p;
@@ -440,10 +470,10 @@ zexpr_eval_maps(const char *s, const struct zregs *regs,
 	if (s == NULL || out == NULL)
 		return -1;
 	if (maps == NULL)
-		return zexpr_eval(s, regs, out);
+		return zexpr_eval_rf(s, rf, out);
 
 	p = s;
-	if (parse_term_maps(&p, regs, maps, &lhs) < 0)
+	if (parse_term_maps(&p, rf, maps, &lhs) < 0)
 		return -1;
 
 	while (*p == ' ' || *p == '\t')
@@ -460,7 +490,7 @@ zexpr_eval_maps(const char *s, const struct zregs *regs,
 		return -1;
 	}
 
-	if (parse_term_maps(&p, regs, maps, &rhs) < 0)
+	if (parse_term_maps(&p, rf, maps, &rhs) < 0)
 		return -1;
 
 	while (*p == ' ' || *p == '\t')
@@ -473,6 +503,19 @@ zexpr_eval_maps(const char *s, const struct zregs *regs,
 	else
 		*out = lhs - rhs;
 	return 0;
+}
+
+int
+zexpr_eval_maps(const char *s, const struct zregs *regs,
+    const struct zmap_table *maps, zaddr_t *out)
+{
+	struct zreg_file rf;
+
+	if (regs == NULL)
+		return zexpr_eval_maps_rf(s, NULL, maps, out);
+	if (build_legacy_rf(&rf, regs) < 0)
+		return -1;
+	return zexpr_eval_maps_rf(s, &rf, maps, out);
 }
 
 /* --- symbol-aware evaluator ------------------------------------ */
@@ -530,7 +573,7 @@ split_off(const char *s, char *base, size_t cap, uint64_t *off, char *op)
 }
 
 int
-zexpr_eval_symbols(const char *s, const struct zregs *regs,
+zexpr_eval_symbols_rf(const char *s, const struct zreg_file *rf,
     const struct zmap_table *maps, const struct zsym_table *syms,
     zaddr_t *out)
 {
@@ -551,11 +594,11 @@ zexpr_eval_symbols(const char *s, const struct zregs *regs,
 	 * symbol).  Doing this first makes numbers like "401000"
 	 * not accidentally shadow a symbol named "401000".
 	 */
-	if (zexpr_eval(s, regs, out) == 0)
+	if (zexpr_eval_rf(s, rf, out) == 0)
 		return 0;
 
 	if (syms == NULL)
-		return zexpr_eval_maps(s, regs, maps, out);
+		return zexpr_eval_maps_rf(s, rf, maps, out);
 
 	has_off = split_off(s, base, sizeof(base), &off, &op);
 	if (has_off < 0)
@@ -582,21 +625,21 @@ zexpr_eval_symbols(const char *s, const struct zregs *regs,
 	 * "name+N" / "name-N" with no colon: preserve legacy
 	 * mapping-relative semantics.  If the LHS happens to be
 	 * a mapping, the whole expression already resolved via
-	 * zexpr_eval_maps() before symbol lookup.  We special-case
+	 * zexpr_eval_maps_rf() before symbol lookup.  We special-case
 	 * "map:N" which contains a colon but is a map token - it
 	 * will be handled here and its strchr hit points inside
 	 * "map:"; fall through to the colon branch only for
 	 * module:symbol.
 	 */
 	if (has_off && colon == NULL) {
-		if (zexpr_eval_maps(s, regs, maps, out) == 0)
+		if (zexpr_eval_maps_rf(s, rf, maps, out) == 0)
 			return 0;
 		/* fall through: try symbol+offset */
 	}
 
 	if (colon != NULL) {
 		/* "map:N" is a map token; try map-eval first. */
-		if (zexpr_eval_maps(s, regs, maps, out) == 0)
+		if (zexpr_eval_maps_rf(s, rf, maps, out) == 0)
 			return 0;
 		{
 			int srv = zsyms_resolve(syms, maps, base, &v);
@@ -634,7 +677,21 @@ zexpr_eval_symbols(const char *s, const struct zregs *regs,
 	}
 
 	/* Fall back to mapping base lookup (e.g. plain "libc"). */
-	return zexpr_eval_maps(s, regs, maps, out);
+	return zexpr_eval_maps_rf(s, rf, maps, out);
+}
+
+int
+zexpr_eval_symbols(const char *s, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zaddr_t *out)
+{
+	struct zreg_file rf;
+
+	if (regs == NULL)
+		return zexpr_eval_symbols_rf(s, NULL, maps, syms, out);
+	if (build_legacy_rf(&rf, regs) < 0)
+		return -1;
+	return zexpr_eval_symbols_rf(s, &rf, maps, syms, out);
 }
 
 /* --- value evaluator (explicit target-memory dereference) ------ */
@@ -812,17 +869,17 @@ sign_extend(uint64_t v, int width)
 }
 
 static int eval_value_term(const char *s, size_t len,
-    const struct zregs *regs, const struct zmap_table *maps,
+    const struct zreg_file *rf, const struct zmap_table *maps,
     const struct zsym_table *syms,
     zexpr_readmem_fn readfn, void *readarg, zaddr_t *out);
 
 /*
  * Evaluate a single value term.  A term is either a deref
  * `FUNC(EXPR)` (with optional whitespace before/after the
- * parens) or a plain expression accepted by zexpr_eval_symbols.
+ * parens) or a plain expression accepted by zexpr_eval_symbols_rf.
  */
 static int
-eval_value_term(const char *s, size_t len, const struct zregs *regs,
+eval_value_term(const char *s, size_t len, const struct zreg_file *rf,
     const struct zmap_table *maps, const struct zsym_table *syms,
     zexpr_readmem_fn readfn, void *readarg, zaddr_t *out)
 {
@@ -856,7 +913,7 @@ eval_value_term(const char *s, size_t len, const struct zregs *regs,
 		}
 		/* Inner expression. */
 		if (eval_value_term(kp + 1, (size_t)(paren_off - 1),
-		    regs, maps, syms, readfn, readarg, &addr) < 0)
+		    rf, maps, syms, readfn, readarg, &addr) < 0)
 			return -1;
 		if (readfn == NULL)
 			return -1;
@@ -876,11 +933,11 @@ eval_value_term(const char *s, size_t len, const struct zregs *regs,
 	}
 
 	/* Not a deref: defer to the symbol-aware evaluator. */
-	return zexpr_eval_symbols(buf, regs, maps, syms, out);
+	return zexpr_eval_symbols_rf(buf, rf, maps, syms, out);
 }
 
 int
-zexpr_eval_value_cb(const char *s, const struct zregs *regs,
+zexpr_eval_value_cb_rf(const char *s, const struct zreg_file *rf,
     const struct zmap_table *maps, const struct zsym_table *syms,
     zexpr_readmem_fn readfn, void *readarg, zaddr_t *out)
 {
@@ -897,19 +954,19 @@ zexpr_eval_value_cb(const char *s, const struct zregs *regs,
 	 * +/-), use that result directly.  This preserves all
 	 * legacy semantics including `main+1000` mapping-relative.
 	 */
-	if (zexpr_eval_symbols(s, regs, maps, syms, out) == 0)
+	if (zexpr_eval_symbols_rf(s, rf, maps, syms, out) == 0)
 		return 0;
 
 	/* Slow path: at least one deref is involved. */
 	op = find_top_arith_op(s);
 	if (op == NULL)
-		return eval_value_term(s, strlen(s), regs, maps, syms,
+		return eval_value_term(s, strlen(s), rf, maps, syms,
 		    readfn, readarg, out);
 
-	if (eval_value_term(s, (size_t)(op - s), regs, maps, syms,
+	if (eval_value_term(s, (size_t)(op - s), rf, maps, syms,
 	    readfn, readarg, &lhs) < 0)
 		return -1;
-	if (eval_value_term(op + 1, strlen(op + 1), regs, maps, syms,
+	if (eval_value_term(op + 1, strlen(op + 1), rf, maps, syms,
 	    readfn, readarg, &rhs) < 0)
 		return -1;
 	if (*op == '+')
@@ -917,6 +974,22 @@ zexpr_eval_value_cb(const char *s, const struct zregs *regs,
 	else
 		*out = (zaddr_t)((uint64_t)lhs - (uint64_t)rhs);
 	return 0;
+}
+
+int
+zexpr_eval_value_cb(const char *s, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zexpr_readmem_fn readfn, void *readarg, zaddr_t *out)
+{
+	struct zreg_file rf;
+
+	if (regs == NULL)
+		return zexpr_eval_value_cb_rf(s, NULL, maps, syms,
+		    readfn, readarg, out);
+	if (build_legacy_rf(&rf, regs) < 0)
+		return -1;
+	return zexpr_eval_value_cb_rf(s, &rf, maps, syms,
+	    readfn, readarg, out);
 }
 
 /*
@@ -940,6 +1013,18 @@ zexpr_eval_value(const char *s, struct ztarget *t,
 	if (s == NULL || out == NULL)
 		return -1;
 	return zexpr_eval_value_cb(s, regs, maps, syms,
+	    t != NULL ? target_readmem_cb : NULL,
+	    (void *)t, out);
+}
+
+int
+zexpr_eval_value_rf(const char *s, struct ztarget *t,
+    const struct zreg_file *rf, const struct zmap_table *maps,
+    const struct zsym_table *syms, zaddr_t *out)
+{
+	if (s == NULL || out == NULL)
+		return -1;
+	return zexpr_eval_value_cb_rf(s, rf, maps, syms,
 	    t != NULL ? target_readmem_cb : NULL,
 	    (void *)t, out);
 }

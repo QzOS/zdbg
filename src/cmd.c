@@ -20,6 +20,7 @@
 #include "zdbg_maps.h"
 #include "zdbg_mem.h"
 #include "zdbg_regs.h"
+#include "zdbg_regfile.h"
 #include "zdbg_signal.h"
 #include "zdbg_exception.h"
 #include "zdbg_symbols.h"
@@ -349,8 +350,14 @@ refresh_regs(struct zdbg *d)
 {
 	if (!target_stopped(d))
 		return;
-	if (ztarget_getregs(&d->target, &d->regs) == 0)
+	if (ztarget_getregs(&d->target, &d->regs) == 0) {
 		d->have_regs = 1;
+		if (zregfile_from_zregs(&d->regfile, d->arch_id,
+		    &d->regs) == 0)
+			d->have_regfile = 1;
+		else
+			d->have_regfile = 0;
+	}
 }
 
 /*
@@ -442,12 +449,14 @@ eval_addr(struct zdbg *d, const char *s, zaddr_t *out)
 {
 	const struct zmap_table *maps;
 	const struct zsym_table *syms;
+	const struct zreg_file *rf;
 
 	if (have_target(d) && !d->have_maps)
 		refresh_maps(d);
 	maps = d->have_maps ? &d->maps : NULL;
 	syms = d->have_syms ? &d->syms : NULL;
-	return zexpr_eval_symbols(s, &d->regs, maps, syms, out);
+	rf = d->have_regfile ? &d->regfile : NULL;
+	return zexpr_eval_symbols_rf(s, rf, maps, syms, out);
 }
 
 /*
@@ -464,12 +473,14 @@ asm_resolve(void *arg, const char *expr, zaddr_t *out)
 	struct zdbg *d = (struct zdbg *)arg;
 	const struct zmap_table *maps;
 	const struct zsym_table *syms;
+	const struct zreg_file *rf;
 
 	if (have_target(d) && !d->have_maps)
 		refresh_maps(d);
 	maps = d->have_maps ? &d->maps : NULL;
 	syms = d->have_syms ? &d->syms : NULL;
-	return zexpr_eval_value(expr, &d->target, &d->regs, maps, syms, out);
+	rf = d->have_regfile ? &d->regfile : NULL;
+	return zexpr_eval_value_rf(expr, &d->target, rf, maps, syms, out);
 }
 
 /* --- r --------------------------------------------------------- */
@@ -484,7 +495,9 @@ cmd_r(struct zdbg *d, struct toks *t)
 	}
 	if (t->n == 1) {
 		refresh_regs(d);
-		if (a->regs_print != NULL)
+		if (d->have_regfile)
+			zregfile_print(&d->regfile);
+		else if (a->regs_print != NULL)
 			a->regs_print(&d->regs);
 		else
 			printf("registers unsupported for architecture %s\n",
@@ -494,8 +507,8 @@ cmd_r(struct zdbg *d, struct toks *t)
 	if (t->n == 2) {
 		uint64_t v = 0;
 		refresh_regs(d);
-		if (a->regs_get_by_name == NULL ||
-		    a->regs_get_by_name(&d->regs, t->v[1], &v) < 0) {
+		if (!d->have_regfile ||
+		    zregfile_get(&d->regfile, t->v[1], &v) < 0) {
 			printf("unknown register: %s\n", t->v[1]);
 			return -1;
 		}
@@ -508,13 +521,20 @@ cmd_r(struct zdbg *d, struct toks *t)
 			printf("target is running\n");
 			return -1;
 		}
-		if (zexpr_eval(t->v[2], &d->regs, &v) < 0) {
+		if (zexpr_eval_rf(t->v[2], d->have_regfile ?
+		    &d->regfile : NULL, &v) < 0) {
 			printf("bad value\n");
 			return -1;
 		}
-		if (a->regs_set_by_name == NULL ||
-		    a->regs_set_by_name(&d->regs, t->v[1], v) < 0) {
+		if (!d->have_regfile ||
+		    zregfile_set(&d->regfile, t->v[1], v) < 0) {
 			printf("unknown register: %s\n", t->v[1]);
+			return -1;
+		}
+		/* Sync the legacy struct zregs and push back to the
+		 * backend so existing get/set paths stay consistent. */
+		if (zregfile_to_zregs(&d->regfile, &d->regs) < 0) {
+			printf("setregs failed\n");
 			return -1;
 		}
 		d->have_regs = 1;
@@ -1022,7 +1042,8 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
 	if (strcmp(opt, "-u32") == 0) {
 		zaddr_t v;
 		if (i + 1 >= argc ||
-		    zexpr_eval_value(argv[i + 1], &d->target, &d->regs,
+		    zexpr_eval_value_rf(argv[i + 1], &d->target,
+		    d->have_regfile ? &d->regfile : NULL,
 		    d->have_maps ? &d->maps : NULL,
 		    d->have_syms ? &d->syms : NULL, &v) < 0) {
 			printf("bad -u32 value\n");
@@ -1035,7 +1056,8 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
 	if (strcmp(opt, "-u64") == 0) {
 		zaddr_t v;
 		if (i + 1 >= argc ||
-		    zexpr_eval_value(argv[i + 1], &d->target, &d->regs,
+		    zexpr_eval_value_rf(argv[i + 1], &d->target,
+		    d->have_regfile ? &d->regfile : NULL,
 		    d->have_maps ? &d->maps : NULL,
 		    d->have_syms ? &d->syms : NULL, &v) < 0) {
 			printf("bad -u64 value\n");
@@ -1048,7 +1070,8 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
 	if (strcmp(opt, "-ptr") == 0) {
 		zaddr_t v;
 		if (i + 1 >= argc ||
-		    zexpr_eval_value(argv[i + 1], &d->target, &d->regs,
+		    zexpr_eval_value_rf(argv[i + 1], &d->target,
+		    d->have_regfile ? &d->regfile : NULL,
 		    d->have_maps ? &d->maps : NULL,
 		    d->have_syms ? &d->syms : NULL, &v) < 0) {
 			printf("bad -ptr expression\n");
@@ -2878,12 +2901,14 @@ cmd_print(struct zdbg *d, struct toks *t)
 	{
 		const struct zmap_table *mt;
 		const struct zsym_table *syt;
+		const struct zreg_file *rf;
 
 		if (have_target(d) && !d->have_maps)
 			refresh_maps(d);
 		mt = d->have_maps ? &d->maps : NULL;
 		syt = d->have_syms ? &d->syms : NULL;
-		if (zexpr_eval_value(expr, &d->target, &d->regs,
+		rf = d->have_regfile ? &d->regfile : NULL;
+		if (zexpr_eval_value_rf(expr, &d->target, rf,
 		    mt, syt, &v) < 0) {
 			printf("bad expression\n");
 			return -1;
@@ -3341,8 +3366,12 @@ cmd_run_and_wait(struct zdbg *d, int step)
 					    d->have_maps ? &d->maps : NULL;
 					const struct zsym_table *syt =
 					    d->have_syms ? &d->syms : NULL;
-					if (zcond_eval(flt->cond, &d->target,
-					    &d->regs, mt, syt, &cres) < 0) {
+					const struct zreg_file *rf =
+					    d->have_regfile ?
+					    &d->regfile : NULL;
+					if (zcond_eval_rf(flt->cond,
+					    &d->target, rf, mt, syt,
+					    &cres) < 0) {
 						printf("condition evaluation"
 						    " failed: %s\n",
 						    flt->cond);
@@ -5539,12 +5568,13 @@ check_reg(struct zdbg *d, const char *name, const char *expr)
 	if (!target_stopped(d))
 		return check_fail("target not stopped");
 	refresh_regs(d);
-	if (d->arch == NULL || d->arch->regs_get_by_name == NULL ||
-	    d->arch->regs_get_by_name(&d->regs, name, &got) < 0)
+	if (!d->have_regfile ||
+	    zregfile_get(&d->regfile, name, &got) < 0)
 		return check_fail("unknown register: %s", name);
 	if (eval_addr(d, expr, &want) < 0) {
 		uint64_t v;
-		if (zexpr_eval(expr, &d->regs, &v) < 0)
+		if (zexpr_eval_rf(expr, d->have_regfile ?
+		    &d->regfile : NULL, &v) < 0)
 			return check_fail("bad value: %s", expr);
 		want = (zaddr_t)v;
 	}
@@ -6070,6 +6100,7 @@ check_expr(struct zdbg *d, const char *cond)
 {
 	const struct zmap_table *mt;
 	const struct zsym_table *syt;
+	const struct zreg_file *rf;
 	int res = 0;
 
 	if (cond == NULL || *cond == 0)
@@ -6079,7 +6110,8 @@ check_expr(struct zdbg *d, const char *cond)
 		refresh_maps(d);
 	mt = d->have_maps ? &d->maps : NULL;
 	syt = d->have_syms ? &d->syms : NULL;
-	if (zcond_eval(cond, &d->target, &d->regs, mt, syt, &res) < 0)
+	rf = d->have_regfile ? &d->regfile : NULL;
+	if (zcond_eval_rf(cond, &d->target, rf, mt, syt, &res) < 0)
 		return check_fail("bad expression: %s", cond);
 	if (!res)
 		return check_fail("expression false: %s", cond);
@@ -6166,6 +6198,16 @@ cmd_check(struct zdbg *d, struct toks *t)
 			return check_fail("usage: %s rip EXPR",
 			    check_word);
 		return check_reg(d, "rip", argv[1]);
+	}
+	if (strcmp(sub, "pc") == 0) {
+		const char *pcname;
+		if (argc < 2)
+			return check_fail("usage: %s pc EXPR",
+			    check_word);
+		pcname = zregfile_role_name(&d->regfile, ZREG_ROLE_PC);
+		if (pcname == NULL)
+			return check_fail("architecture has no PC role");
+		return check_reg(d, pcname, argv[1]);
 	}
 	if (strcmp(sub, "mem") == 0)
 		return check_mem(d, argv, argc);
@@ -6496,6 +6538,7 @@ zdbg_init(struct zdbg *d)
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
+	d->have_regfile = 0;
 	d->have_maps = 0;
 	d->have_regions = 0;
 	d->have_syms = 0;

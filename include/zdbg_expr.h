@@ -18,6 +18,7 @@
 
 #include "zdbg.h"
 #include "zdbg_regs.h"
+#include "zdbg_regfile.h"
 
 struct zmap_table;
 struct zsym_table;
@@ -101,6 +102,32 @@ int zexpr_eval_value_cb(const char *s, const struct zregs *regs,
 
 int zexpr_eval_value(const char *s, struct ztarget *t,
     const struct zregs *regs, const struct zmap_table *maps,
+    const struct zsym_table *syms, zaddr_t *out);
+
+/*
+ * Register-file aware variants of the expression evaluator.
+ * Functionally identical to the `struct zregs *` versions but
+ * resolve register names through the generic register file
+ * abstraction (zregfile_get).  These are the recommended entry
+ * points for new code; the legacy `struct zregs *` variants
+ * remain for backend-internal users and existing tests.
+ */
+int zexpr_eval_rf(const char *s, const struct zreg_file *rf,
+    zaddr_t *out);
+
+int zexpr_eval_maps_rf(const char *s, const struct zreg_file *rf,
+    const struct zmap_table *maps, zaddr_t *out);
+
+int zexpr_eval_symbols_rf(const char *s, const struct zreg_file *rf,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zaddr_t *out);
+
+int zexpr_eval_value_cb_rf(const char *s, const struct zreg_file *rf,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zexpr_readmem_fn readfn, void *readarg, zaddr_t *out);
+
+int zexpr_eval_value_rf(const char *s, struct ztarget *t,
+    const struct zreg_file *rf, const struct zmap_table *maps,
     const struct zsym_table *syms, zaddr_t *out);
 
 #endif /* ZDBG_EXPR_H */
