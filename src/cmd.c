@@ -912,7 +912,7 @@ s_parse_uint(const char *s, uint64_t *out)
 }
 
 /*
- * Parse one pattern selector starting at argv[*ip].
+ * Parse one pattern selector starting at argv[*idxp].
  *
  * Recognized forms:
  *   -str "text"   ASCII bytes (with the same escape set as cmd_s)
@@ -922,24 +922,24 @@ s_parse_uint(const char *s, uint64_t *out)
  *   -ptr  expr    pointer-sized little-endian (currently 8 bytes)
  *
  * Returns:
- *    1  selector recognized and consumed; *ip advanced past the
+ *    1  selector recognized and consumed; *idxp advanced past the
  *       value argument; *lenp set
- *    0  argv[*ip] is not a recognized selector; nothing consumed
+ *    0  argv[*idxp] is not a recognized selector; nothing consumed
  *   -1  selector recognized but its argument was missing or
  *       invalid; an error message has already been printed
  *
  * Shared by cmd_s and cmd_check so the two stay in sync.
  */
 static int
-parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *ip,
+parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
     uint8_t *pat, size_t cap, size_t *lenp)
 {
 	const char *opt;
 	int i;
 
-	if (argv == NULL || ip == NULL || pat == NULL || lenp == NULL)
+	if (argv == NULL || idxp == NULL || pat == NULL || lenp == NULL)
 		return -1;
-	i = *ip;
+	i = *idxp;
 	if (i >= argc)
 		return 0;
 	opt = argv[i];
@@ -956,7 +956,7 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *ip,
 			printf("bad string\n");
 			return -1;
 		}
-		*ip = i + 1;
+		*idxp = i + 1;
 		return 1;
 	}
 	if (strcmp(opt, "-wstr") == 0) {
@@ -969,7 +969,7 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *ip,
 			printf("bad wstring\n");
 			return -1;
 		}
-		*ip = i + 1;
+		*idxp = i + 1;
 		return 1;
 	}
 	if (strcmp(opt, "-u32") == 0) {
@@ -979,7 +979,7 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *ip,
 			return -1;
 		}
 		zmem_make_u32_pattern((uint32_t)v, pat, cap, lenp);
-		*ip = i + 1;
+		*idxp = i + 1;
 		return 1;
 	}
 	if (strcmp(opt, "-u64") == 0) {
@@ -989,7 +989,7 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *ip,
 			return -1;
 		}
 		zmem_make_u64_pattern((uint64_t)v, pat, cap, lenp);
-		*ip = i + 1;
+		*idxp = i + 1;
 		return 1;
 	}
 	if (strcmp(opt, "-ptr") == 0) {
@@ -999,7 +999,7 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *ip,
 			return -1;
 		}
 		zmem_make_u64_pattern((uint64_t)v, pat, cap, lenp);
-		*ip = i + 1;
+		*idxp = i + 1;
 		return 1;
 	}
 	return 0;
@@ -4607,16 +4607,16 @@ check_mem(struct zdbg *d, char **argv, int argc)
 		 * `s addr len bytes...`. */
 		char tmp[ZDBG_SEARCH_MAX_PATTERN * 4];
 		size_t tlen = 0;
-		int k2;
+		int j;
 		tmp[0] = 0;
-		for (k2 = i; k2 < argc; k2++) {
-			size_t need = strlen(argv[k2]) + 2;
+		for (j = i; j < argc; j++) {
+			size_t need = strlen(argv[j]) + 2;
 			if (tlen + need >= sizeof(tmp))
 				return check_fail("pattern too long");
 			if (tlen)
 				tmp[tlen++] = ' ';
-			memcpy(tmp + tlen, argv[k2], strlen(argv[k2]));
-			tlen += strlen(argv[k2]);
+			memcpy(tmp + tlen, argv[j], strlen(argv[j]));
+			tlen += strlen(argv[j]);
 			tmp[tlen] = 0;
 		}
 		if (zmem_parse_bytes(tmp, pat, sizeof(pat), &patlen) < 0
