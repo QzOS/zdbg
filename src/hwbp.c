@@ -100,6 +100,7 @@ zhwbp_alloc(struct zhwbp_table *ht, zaddr_t addr,
 			ht->bp[i].addr = addr;
 			ht->bp[i].len = len;
 			zfilter_init(&ht->bp[i].filter);
+			zactions_init(&ht->bp[i].actions);
 			return i;
 		}
 	}

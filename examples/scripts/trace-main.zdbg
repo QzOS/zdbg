@@ -1,0 +1,24 @@
+; trace-main.zdbg
+;
+; Demonstrates a software tracepoint built from a breakpoint
+; with an action list.  When `main` is hit, the action list
+; prints a small message and resumes the target automatically;
+; the program then runs to completion.
+;
+; This example is primarily for ELF targets with a visible
+; `main` symbol (the bundled testprog satisfies that).  On
+; Windows builds without exported symbols the address would
+; need to come from a different source.
+;
+; Run with: zdbg -b -x trace-main.zdbg
+;
+l ./examples/testprog
+b main
+actions b 0 silent on
+actions b 0 add printf trace: main hit
+actions b 0 add continue
+check bp 0 actions #2
+check bp 0 silent yes
+g
+check exited 0
+q
