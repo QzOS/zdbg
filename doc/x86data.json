@@ -82,11 +82,6 @@
 // [ ] VMX/SVM extensions
 // [ ] TSX extensions
 
-(function($export, $as) {
-"use strict";
-
-$export[$as] =
-// ${JSON:BEGIN}
 {
   "architectures": [
     "ANY",
