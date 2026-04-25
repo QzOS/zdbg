@@ -539,15 +539,39 @@ Encoding sizes are deterministic, chosen by the mnemonic:
     jz8/jnz8 = 2 bytes (74/75 rel8)
     nop/int3/ret = 1 byte
 
+For far targets that cannot be reached with `rel32` (typically a
+patch in the main module that needs to call into a DLL/.so), the
+tiny assembler also accepts opt-in absolute pseudo-instructions:
+
+    jmpabs  TARGET  = 13 bytes (49 BB <imm64> 41 FF E3)
+    callabs TARGET  = 13 bytes (49 BB <imm64> 41 FF D3)
+    jzabs   TARGET  = 15 bytes (75 0D 49 BB <imm64> 41 FF E3)
+    jnzabs  TARGET  = 15 bytes (74 0D 49 BB <imm64> 41 FF E3)
+
+`jeabs`/`jneabs` are aliases for `jzabs`/`jnzabs`.
+
+Each absolute form is `movabs r11, TARGET` followed by an indirect
+`jmp r11` or `call r11`; the conditional variants prepend an
+inverted rel8 conditional jump that skips the 13-byte absolute
+sequence.  They therefore **clobber `r11`** unconditionally — `r11`
+is a volatile/caller-saved register in both System V AMD64 and
+Windows x64 ABIs, but the user must still pick a patch site where
+that is acceptable.  Absolute forms do not allocate trampolines,
+preserve registers, relocate overwritten instructions, or create
+PE/ELF relocations.
+
 For `pa`, `len` must be at least the encoded instruction length;
 shorter encodings are NOP-filled to `len`, longer ones are
 rejected with `instruction length N exceeds patch length M`.
 Examples:
 
-    pa addr 5 jmp symbol
-    pa addr 5 call symbol
-    pa addr 6 jz symbol
-    pa addr 2 jz8 symbol
+    pa addr 5  jmp  symbol
+    pa addr 5  call symbol
+    pa addr 6  jz   symbol
+    pa addr 2  jz8  symbol
+    pa addr 13 jmpabs  module:symbol
+    pa addr 13 callabs module:symbol
+    pa addr 15 jzabs   module:symbol
 
 Memory search (`s`) is chunked and bounded.  Region search
 (`-a` / `-r` / `-m`) skips guard pages and silently skips

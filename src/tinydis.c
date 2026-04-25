@@ -368,6 +368,43 @@ ztinydis_one(zaddr_t addr, const uint8_t *buf, size_t buflen,
 		return 0;
 	}
 
+	/* FF /2 call r/m64, FF /4 jmp r/m64 - register form only.
+	 * In long mode FF /2 and FF /4 are implicitly 64-bit; REX.W
+	 * is not required.  We only decode mod=3 here so that
+	 * `41 FF E3` -> `jmp r11` and `41 FF D3` -> `call r11`. */
+	if (op == 0xff) {
+		uint8_t modrm;
+		int sub;
+		int rm;
+		size_t mpos = pos + 1;
+		if (buflen < mpos + 1) {
+			emit_db(addr, buf, out); return 0;
+		}
+		modrm = buf[mpos];
+		if (((modrm >> 6) & 3) == 3) {
+			sub = (modrm >> 3) & 7;
+			rm = (modrm & 7) | (rex_b ? 8 : 0);
+			if (sub == 4) {
+				copy_bytes(out, buf, mpos + 1);
+				out->kind = ZINSN_JMP;
+				out->is_branch = 1;
+				snprintf(out->text, sizeof(out->text),
+				    "jmp %s", reg64[rm]);
+				return 0;
+			}
+			if (sub == 2) {
+				copy_bytes(out, buf, mpos + 1);
+				out->kind = ZINSN_CALL;
+				out->is_call = 1;
+				snprintf(out->text, sizeof(out->text),
+				    "call %s", reg64[rm]);
+				return 0;
+			}
+		}
+		emit_db(addr, buf, out);
+		return 0;
+	}
+
 	/* mov r32/r64, imm: b8+rd */
 	if (op >= 0xb8 && op <= 0xbf) {
 		int r = (op - 0xb8) & 7;

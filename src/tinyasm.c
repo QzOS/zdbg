@@ -176,6 +176,63 @@ encode_jcc_rel8(zaddr_t addr, zaddr_t target, uint8_t op,
 }
 
 /*
+ * Write `movabs r11, imm64` (49 BB imm64) followed by either
+ * `jmp r11` (41 FF E3) or `call r11` (41 FF D3).  This is the
+ * common tail of jmpabs/callabs/jzabs/jnzabs and clobbers r11.
+ */
+static void
+write_imm64_le(struct ztinyasm *out, uint64_t v)
+{
+	int i;
+	for (i = 0; i < 8; i++)
+		out->code[out->len++] = (uint8_t)((v >> (i * 8)) & 0xff);
+}
+
+static void
+write_movabs_r11_jmp_or_call(struct ztinyasm *out, uint64_t target,
+    int is_call)
+{
+	/* movabs r11, imm64 : 49 BB imm64 */
+	write_u8(out, 0x49);
+	write_u8(out, 0xbb);
+	write_imm64_le(out, target);
+	/* jmp r11  : 41 FF E3   /  call r11 : 41 FF D3 */
+	write_u8(out, 0x41);
+	write_u8(out, 0xff);
+	write_u8(out, is_call ? 0xd3 : 0xe3);
+}
+
+static int
+encode_jmpabs(zaddr_t target, struct ztinyasm *out)
+{
+	write_movabs_r11_jmp_or_call(out, (uint64_t)target, 0);
+	return 0;
+}
+
+static int
+encode_callabs(zaddr_t target, struct ztinyasm *out)
+{
+	write_movabs_r11_jmp_or_call(out, (uint64_t)target, 1);
+	return 0;
+}
+
+/*
+ * Conditional absolute pseudo: skip the 13-byte absolute jmp
+ * sequence with an inverted rel8 conditional jump.
+ *
+ *   jzabs  TARGET -> 75 0D | 49 BB <imm64> 41 FF E3   (jnz +13)
+ *   jnzabs TARGET -> 74 0D | 49 BB <imm64> 41 FF E3   (jz  +13)
+ */
+static int
+encode_jccabs(zaddr_t target, uint8_t skip_op, struct ztinyasm *out)
+{
+	write_u8(out, skip_op);
+	write_u8(out, 0x0d); /* skip the 13-byte absolute sequence */
+	write_movabs_r11_jmp_or_call(out, (uint64_t)target, 0);
+	return 0;
+}
+
+/*
  * Legacy resolver used by the old API: only numbers and
  * registers via zexpr_eval().
  */
@@ -264,6 +321,19 @@ ztinyasm_assemble_ex(zaddr_t addr, const char *line, struct ztinyasm *out,
 	if (strcmp(mn, "jnz8") == 0 || strcmp(mn, "jne8") == 0)
 		return encode_jcc_rel8(addr, target, 0x75, out, mn,
 		    err, errcap);
+
+	/* Absolute pseudo-instructions via r11 scratch (clobbered).
+	 * No rel32 range error: target is loaded as a full imm64. */
+	if (strcmp(mn, "jmpabs") == 0)
+		return encode_jmpabs(target, out);
+	if (strcmp(mn, "callabs") == 0)
+		return encode_callabs(target, out);
+	if (strcmp(mn, "jzabs") == 0 || strcmp(mn, "jeabs") == 0)
+		/* take when ZF==1: skip when ZF==0 -> jnz8 +13 */
+		return encode_jccabs(target, 0x75, out);
+	if (strcmp(mn, "jnzabs") == 0 || strcmp(mn, "jneabs") == 0)
+		/* take when ZF==0: skip when ZF==1 -> jz8 +13 */
+		return encode_jccabs(target, 0x74, out);
 
 	set_errf(err, errcap, "unknown instruction: %s", mn);
 	return -1;
