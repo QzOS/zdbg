@@ -34,4 +34,23 @@ int zaarch64_decode_one(zaddr_t addr, const uint8_t *buf,
  */
 zaddr_t zaarch64_fallthrough(const struct zdecode *d);
 
+/*
+ * Phase-1 AArch64 tiny patch encoder.  Encodes a single
+ * fixed-width 4-byte AArch64 instruction (`assemble_one`) or a
+ * patch slot whose length must be a positive multiple of 4
+ * (`assemble_patch`, NOP-fills any unused tail).  Branch targets
+ * are resolved through `resolve(resolve_arg, expr, &out)`.  Both
+ * functions return 0 on success and -1 on error, writing a short
+ * diagnostic to `err`.
+ */
+int zaarch64_assemble_one(zaddr_t addr, const char *line,
+    uint8_t *buf, size_t buflen, size_t *lenp,
+    zarch_resolve_fn resolve, void *resolve_arg,
+    char *err, size_t errcap);
+
+int zaarch64_assemble_patch(zaddr_t addr, size_t patch_len,
+    const char *line, uint8_t *buf, size_t buflen, size_t *lenp,
+    zarch_resolve_fn resolve, void *resolve_arg,
+    char *err, size_t errcap);
+
 #endif /* ZDBG_ARCH_AARCH64_H */

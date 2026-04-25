@@ -273,7 +273,16 @@ test_aarch64_unsupported(void)
 
 	err[0] = 0;
 	CHECK(a->assemble_patch != NULL);
+	/* Phase-1 AArch64 assembler: nop is supported and emits the
+	 * canonical NOP word little-endian. */
 	CHECK(a->assemble_patch(0x1000, 4, "nop", buf, sizeof(buf),
+	    &out_len, resolve_number, NULL, err, sizeof(err)) == 0);
+	CHECK(out_len == 4);
+	CHECK(buf[0] == 0x1f && buf[1] == 0x20 &&
+	    buf[2] == 0x03 && buf[3] == 0xd5);
+	/* Misaligned patch length is rejected. */
+	err[0] = 0;
+	CHECK(a->assemble_patch(0x1000, 5, "nop", buf, sizeof(buf),
 	    &out_len, resolve_number, NULL, err, sizeof(err)) == -1);
 	CHECK(err[0] != 0);
 
@@ -285,14 +294,18 @@ test_aarch64_unsupported(void)
 	CHECK(a->get_sp(&r, &v) == -1);
 	CHECK(a->get_fp(&r, &v) == -1);
 
-	/* assemble_one: unsupported with diagnostic */
+	/* assemble_one: nop is supported and emits 4 bytes. */
 	err[0] = 0;
 	out_len = 0;
 	CHECK(a->assemble_one != NULL);
 	CHECK(a->assemble_one(0x1000, "nop", buf, sizeof(buf), &out_len,
+	    resolve_number, NULL, err, sizeof(err)) == 0);
+	CHECK(out_len == 4);
+	/* Unknown mnemonic still fails cleanly. */
+	err[0] = 0;
+	CHECK(a->assemble_one(0x1000, "bogus", buf, sizeof(buf), &out_len,
 	    resolve_number, NULL, err, sizeof(err)) == -1);
 	CHECK(err[0] != 0);
-	CHECK(strstr(err, "aarch64") != NULL);
 
 	/* register hooks: present and unsupported */
 	CHECK(a->regs_print != NULL);

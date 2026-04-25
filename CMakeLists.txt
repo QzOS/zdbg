@@ -18,6 +18,7 @@ set(ZDBG_CORE_SOURCES
     src/arch_x86_64.c
     src/arch_aarch64.c
     src/arch_aarch64_dis.c
+    src/arch_aarch64_asm.c
     src/regs.c
     src/regfile.c
     src/mem.c

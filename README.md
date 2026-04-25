@@ -582,6 +582,15 @@ Examples:
     pa addr 13 callabs module:symbol
     pa addr 15 jzabs   module:symbol
 
+On AArch64, every patch instruction is exactly 4 bytes and `len`
+must be a positive multiple of 4 (extra slots are NOP-filled):
+
+    pa addr 4 nop
+    pa addr 4 brk #0
+    pa addr 4 b symbol
+    pa addr 4 b.eq symbol
+    pa addr 8 ret             ; ret + nop fill
+
 Memory search (`s`) is chunked and bounded.  Region search
 (`-a` / `-r` / `-m`) skips guard pages and silently skips
 unreadable pages; it stops at a default result limit of 64
@@ -747,9 +756,13 @@ zdbg separates two axes:
   prologue/epilogue (`stp`/`ldp`/`mov fp,sp`), simple ADD/SUB
   immediates (and CMP/CMN aliases), `adr`/`adrp`, `nop`/`brk`/
   `svc`; everything else prints as `.word 0xNNNNNNNN`.  AArch64
-  assembler, hardware breakpoints/watchpoints, and unwinder are
-  still unimplemented and the corresponding ops fail cleanly with
-  messages like "assembly not supported for architecture aarch64".
+  assembly is a phase-1 tiny patch encoder for fixed-width 4-byte
+  instructions: `nop`, `brk`, `svc`, `ret`/`br`/`blr`, `b`/`bl`,
+  `b.cond` (and `beq`/`bne` aliases), `cbz`/`cbnz`, `tbz`/`tbnz`,
+  and a small `add`/`sub`/`cmp`/`mov`-from-SP subset.  Unknown or
+  full AArch64 assembly remains unsupported.  Hardware breakpoints/
+  watchpoints, conditional-jump inversion (`ij`), and the unwinder
+  are still unimplemented and the corresponding ops fail cleanly.
 
 Generic command, run-control and breakpoint code reaches for
 architecture-specific behavior only through the ops table on
@@ -823,9 +836,17 @@ Limitations of this phase:
   The decoder intentionally omits SIMD/FP/SVE, full load/store
   forms, full data-processing, system instructions beyond basic
   hint/svc/brk, PAC/BTI semantics, and instruction relocation.
-  `a`/`pa` remain unsupported on AArch64.  `hb`/`hw` are
-  unsupported on AArch64 (DR0..DR7 are x86-64-only; AArch64
-  hardware debug registers are future work).
+  `a`/`pa` are supported on AArch64 for a fixed-width subset
+  (see above).  AArch64 instructions are 4 bytes wide, so
+  `pa addr len insn` requires `len` to be a positive multiple of
+  4: when `len > 4` zdbg NOP-fills the remaining whole instruction
+  slots.  Partial-instruction patching is rejected.  No labels,
+  literal pools, relocations, load/store general syntax, SIMD/FP/
+  SVE, PAC/BTI helpers, ADRP+ADD relocation logic, or multi-
+  instruction pseudo expansions are supported.  `ij`, `hb`/`hw`
+  remain unsupported on AArch64 (DR0..DR7 are x86-64-only;
+  AArch64 hardware debug registers and conditional inversion are
+  future work).
 * Attach machine detection is not implemented; attach defaults
   to the backend's native architecture.
 
@@ -842,8 +863,9 @@ The legacy x86-64 names (`rip`, `rsp`, etc.) and the
     src/            core implementation
         arch.c          architecture ops registry
         arch_x86_64.c   x86-64 ops (wraps tinyasm/tinydis)
-        arch_aarch64.c  AArch64 ops (wraps arch_aarch64_dis)
+        arch_aarch64.c  AArch64 ops (wraps arch_aarch64_dis/_asm)
         arch_aarch64_dis.c  AArch64 phase-1 decoder/disassembler
+        arch_aarch64_asm.c  AArch64 phase-1 tiny patch encoder
         regs.c          legacy x86-64 register helpers
         regfile.c       generic integer register-file view
         machine.c       ELF64/PE32+ executable machine detection
