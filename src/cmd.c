@@ -27,6 +27,7 @@
 #include "zdbg_tinyasm.h"
 #include "zdbg_tinydis.h"
 #include "zdbg_patch.h"
+#include "zdbg_filter.h"
 
 #define RC_QUIT 1
 
@@ -149,6 +150,10 @@ print_help(void)
 	    "  hc n|*               clear hardware breakpoint/watchpoint\n"
 	    "  hd n                 disable hardware slot\n"
 	    "  he n                 enable hardware slot\n"
+	    "  cond b|h id expr     set breakpoint/watchpoint condition\n"
+	    "  cond b|h id clear    clear condition\n"
+	    "  ignore b|h id count  ignore next count hits\n"
+	    "  hits b|h id [reset]  show/reset hit count\n"
 	    "  lm [addr]            list maps or show map at addr\n"
 	    "  sym [filter|-r]      list/search/refresh ELF symbols\n"
 	    "  addr expr            show address, nearest symbol, mapping\n"
@@ -2162,6 +2167,7 @@ cmd_hl(struct zdbg *d, struct toks *t)
 	for (i = 0; i < ZDBG_MAX_HWBP; i++) {
 		const struct zhwbp *b = &d->hwbps.bp[i];
 		char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+		char cond[ZDBG_FILTER_EXPR_MAX + 8];
 		const char *s;
 		const char *kname;
 
@@ -2171,7 +2177,17 @@ cmd_hl(struct zdbg *d, struct toks *t)
 		kname = (b->kind == ZHWBP_EXEC) ? "exec     " :
 		    (b->kind == ZHWBP_WRITE) ? "write    " : "readwrite";
 		annot_addr(d, b->addr, ann, sizeof(ann));
-		printf(" %d %s %s len=%d %016llx%s\n", i, s, kname, b->len,
+		if (b->filter.has_cond)
+			snprintf(cond, sizeof(cond), "cond=\"%s\"",
+			    b->filter.cond);
+		else
+			snprintf(cond, sizeof(cond), "cond=none");
+		printf(" %d %s %s len=%d hits=%llu ignore=%llu %s"
+		    " %016llx%s\n",
+		    i, s, kname, b->len,
+		    (unsigned long long)b->filter.hits,
+		    (unsigned long long)b->filter.ignore,
+		    cond,
 		    (unsigned long long)b->addr, ann);
 		any = 1;
 	}
@@ -2240,6 +2256,202 @@ cmd_he(struct zdbg *d, struct toks *t)
 		printf("enable failed\n");
 		return -1;
 	}
+	return 0;
+}
+
+/* --- cond / ignore / hits -------------------------------------- */
+
+/*
+ * Look up a "b" or "h" subject and resolve the breakpoint id.
+ * On success returns 0 and stores the filter pointer plus a
+ * label ("bp" / "hwbp") for diagnostics.  Returns -1 on a bad
+ * subject token, bad id, or empty slot.
+ */
+static int
+filter_resolve(struct zdbg *d, const char *which, const char *idtok,
+    struct zstop_filter **fp, const char **labelp, int *idp)
+{
+	uint64_t v;
+
+	if (which == NULL || idtok == NULL || fp == NULL ||
+	    labelp == NULL || idp == NULL)
+		return -1;
+	if (strcmp(which, "b") == 0) {
+		if (zexpr_eval(idtok, NULL, &v) < 0)
+			return -1;
+		if (v >= ZDBG_MAX_BREAKPOINTS)
+			return -1;
+		if (d->bps.bp[v].state == ZBP_EMPTY)
+			return -1;
+		*fp = &d->bps.bp[v].filter;
+		*labelp = "bp";
+		*idp = (int)v;
+		return 0;
+	}
+	if (strcmp(which, "h") == 0) {
+		if (zexpr_eval(idtok, NULL, &v) < 0)
+			return -1;
+		if (v >= ZDBG_MAX_HWBP)
+			return -1;
+		if (d->hwbps.bp[v].state == ZHWBP_EMPTY)
+			return -1;
+		*fp = &d->hwbps.bp[v].filter;
+		*labelp = "hwbp";
+		*idp = (int)v;
+		return 0;
+	}
+	return -1;
+}
+
+/*
+ * cond b|h ID [EXPR... | clear]
+ *
+ * With no EXPR the current condition is shown.  With "clear"
+ * the condition is removed.  Otherwise the rest of the line
+ * starting at argv[3] is taken verbatim as the condition text;
+ * this preserves whitespace inside expressions like
+ *   cond b 0 rdi == #3
+ */
+static int
+cmd_cond(struct zdbg *d, struct toks *t)
+{
+	struct zstop_filter *f = NULL;
+	const char *label = "?";
+	int id = -1;
+	const char *expr;
+
+	if (t->n < 3) {
+		printf("usage: cond b|h ID [EXPR... | clear]\n");
+		return -1;
+	}
+	if (filter_resolve(d, t->v[1], t->v[2], &f, &label, &id) < 0) {
+		printf("cond: bad subject or id\n");
+		return -1;
+	}
+	if (t->n == 3) {
+		if (f->has_cond)
+			printf("%s %d condition: %s\n", label, id, f->cond);
+		else
+			printf("%s %d condition: none\n", label, id);
+		return 0;
+	}
+	if (t->n == 4 && strcmp(t->v[3], "clear") == 0) {
+		zfilter_clear_condition(f);
+		printf("%s %d condition cleared\n", label, id);
+		return 0;
+	}
+	expr = rest_from(t->orig, 3);
+	while (*expr == ' ' || *expr == '\t')
+		expr++;
+	if (*expr == 0) {
+		printf("usage: cond b|h ID EXPR... | clear\n");
+		return -1;
+	}
+	if (zfilter_set_condition(f, expr) < 0) {
+		printf("cond: condition too long (max %d)\n",
+		    ZDBG_FILTER_EXPR_MAX - 1);
+		return -1;
+	}
+	printf("%s %d condition: %s\n", label, id, f->cond);
+	return 0;
+}
+
+/* ignore b|h ID COUNT  -- replaces the current ignore count. */
+static int
+cmd_ignore(struct zdbg *d, struct toks *t)
+{
+	struct zstop_filter *f = NULL;
+	const char *label = "?";
+	int id = -1;
+	uint64_t n;
+
+	if (t->n < 4) {
+		printf("usage: ignore b|h ID COUNT\n");
+		return -1;
+	}
+	if (filter_resolve(d, t->v[1], t->v[2], &f, &label, &id) < 0) {
+		printf("ignore: bad subject or id\n");
+		return -1;
+	}
+	if (zexpr_eval(t->v[3], NULL, &n) < 0) {
+		printf("ignore: bad count\n");
+		return -1;
+	}
+	zfilter_set_ignore(f, n);
+	printf("%s %d will ignore next %llu hits\n", label, id,
+	    (unsigned long long)n);
+	return 0;
+}
+
+/*
+ * hits b|h ID [reset]
+ * hits b|h *  reset    (reset every breakpoint of that kind)
+ */
+static int
+cmd_hits(struct zdbg *d, struct toks *t)
+{
+	struct zstop_filter *f = NULL;
+	const char *label = "?";
+	int id = -1;
+	int reset = 0;
+
+	if (t->n < 3) {
+		printf("usage: hits b|h ID [reset]\n");
+		return -1;
+	}
+	reset = (t->n >= 4 && strcmp(t->v[3], "reset") == 0);
+
+	if (strcmp(t->v[2], "*") == 0) {
+		int i;
+		int max;
+		if (!reset) {
+			printf("usage: hits b|h * reset\n");
+			return -1;
+		}
+		if (strcmp(t->v[1], "b") == 0) {
+			max = ZDBG_MAX_BREAKPOINTS;
+			for (i = 0; i < max; i++) {
+				if (d->bps.bp[i].state != ZBP_EMPTY)
+					zfilter_reset_hits(
+					    &d->bps.bp[i].filter);
+			}
+			printf("bp * hits reset\n");
+			return 0;
+		}
+		if (strcmp(t->v[1], "h") == 0) {
+			max = ZDBG_MAX_HWBP;
+			for (i = 0; i < max; i++) {
+				if (d->hwbps.bp[i].state != ZHWBP_EMPTY)
+					zfilter_reset_hits(
+					    &d->hwbps.bp[i].filter);
+			}
+			printf("hwbp * hits reset\n");
+			return 0;
+		}
+		printf("hits: bad subject\n");
+		return -1;
+	}
+
+	if (filter_resolve(d, t->v[1], t->v[2], &f, &label, &id) < 0) {
+		printf("hits: bad subject or id\n");
+		return -1;
+	}
+	if (reset) {
+		zfilter_reset_hits(f);
+		printf("%s %d hits reset\n", label, id);
+		return 0;
+	}
+	if (f->has_cond)
+		printf("%s %d hits=%llu ignore=%llu condition=\"%s\"\n",
+		    label, id,
+		    (unsigned long long)f->hits,
+		    (unsigned long long)f->ignore,
+		    f->cond);
+	else
+		printf("%s %d hits=%llu ignore=%llu condition=none\n",
+		    label, id,
+		    (unsigned long long)f->hits,
+		    (unsigned long long)f->ignore);
 	return 0;
 }
 
@@ -2436,6 +2648,7 @@ cmd_run_and_wait(struct zdbg *d, int step)
 	struct zstop st;
 	int bp_id = -1;
 	int rc;
+	uint64_t auto_count = 0;
 
 	if (!have_target(d)) {
 		printf("no target\n");
@@ -2476,6 +2689,96 @@ cmd_run_and_wait(struct zdbg *d, int step)
 			return -1;
 		}
 		zdbg_after_wait(d, &st, &bp_id);
+
+		/*
+		 * Breakpoint/watchpoint filter: hit count, ignore
+		 * count, and optional condition.  Runs only for
+		 * recognized zdbg-owned hits and only for non-temp
+		 * software breakpoints.  When a hit is suppressed,
+		 * auto-continue using the existing rearm dance for
+		 * software breakpoints; hardware stops just continue.
+		 */
+		{
+			struct zstop_filter *flt = NULL;
+			int sw_id = d->stopped_bp;
+			int hw_id = d->stopped_hwbp;
+			int is_sw = 0;
+			int is_hw = 0;
+
+			if (sw_id >= 0 && sw_id < ZDBG_MAX_BREAKPOINTS &&
+			    !d->bps.bp[sw_id].temporary) {
+				flt = &d->bps.bp[sw_id].filter;
+				is_sw = 1;
+			} else if (hw_id >= 0 && hw_id < ZDBG_MAX_HWBP) {
+				flt = &d->hwbps.bp[hw_id].filter;
+				is_hw = 1;
+			}
+			if (flt != NULL) {
+				int should_stop = 1;
+				flt->hits++;
+				if (flt->ignore > 0) {
+					flt->ignore--;
+					should_stop = 0;
+				} else if (flt->has_cond) {
+					int cres = 0;
+					const struct zmap_table *mt =
+					    d->have_maps ? &d->maps : NULL;
+					const struct zsym_table *syt =
+					    d->have_syms ? &d->syms : NULL;
+					if (zcond_eval(flt->cond, &d->regs,
+					    mt, syt, &cres) < 0) {
+						printf("condition evaluation"
+						    " failed: %s\n",
+						    flt->cond);
+						should_stop = 1;
+					} else {
+						should_stop = cres ? 1 : 0;
+					}
+				}
+				if (!should_stop) {
+					auto_count++;
+					if (auto_count >
+					    ZDBG_FILTER_AUTO_LIMIT) {
+						printf("auto-continue limit"
+						    " reached while"
+						    " filtering"
+						    " breakpoints\n");
+						/* fall through to report */
+					} else {
+						if (is_sw) {
+							int rrc;
+							rrc = zdbg_resume_from_bp(
+							    d, 0);
+							if (rrc < 0)
+								return -1;
+							if (rrc == 1)
+								return 0;
+							(void)zhwbp_program(
+							    &d->target,
+							    &d->hwbps);
+							if (ztarget_continue(
+							    &d->target) < 0) {
+								printf("continue"
+								    " failed\n");
+								return -1;
+							}
+						} else if (is_hw) {
+							d->stopped_hwbp = -1;
+							(void)zhwbp_program(
+							    &d->target,
+							    &d->hwbps);
+							if (ztarget_continue(
+							    &d->target) < 0) {
+								printf("continue"
+								    " failed\n");
+								return -1;
+							}
+						}
+						continue;
+					}
+				}
+			}
+		}
 
 		if (st.reason == ZSTOP_EXCEPTION) {
 			const struct zexc_policy *xp;
@@ -4760,6 +5063,143 @@ check_bp_state(struct zdbg *d, const char *idtok, const char *state)
 	return check_fail("unknown bp state: %s", state);
 }
 
+/*
+ * Common filter-state assertions for both software breakpoints
+ * and hardware breakpoints/watchpoints:
+ *
+ *   hits N      filter.hits equals N exactly
+ *   ignore N    filter.ignore equals N exactly
+ *   cond none   condition is not set
+ *   cond TEXT   condition string equals TEXT verbatim
+ */
+static int
+check_filter_state(const char *label, int id, const struct zstop_filter *f,
+    const char *kind, const char *arg)
+{
+	uint64_t want;
+
+	if (kind == NULL)
+		return check_fail("usage: check %s %d hits|ignore|cond ...",
+		    label, id);
+	if (strcmp(kind, "hits") == 0) {
+		if (arg == NULL || zexpr_eval(arg, NULL, &want) < 0)
+			return check_fail(
+			    "usage: check %s %d hits VALUE",
+			    label, id);
+		if (f->hits != want)
+			return check_fail(
+			    "%s %d hits expected %llu, got %llu",
+			    label, id, (unsigned long long)want,
+			    (unsigned long long)f->hits);
+		return 0;
+	}
+	if (strcmp(kind, "ignore") == 0) {
+		if (arg == NULL || zexpr_eval(arg, NULL, &want) < 0)
+			return check_fail(
+			    "usage: check %s %d ignore VALUE",
+			    label, id);
+		if (f->ignore != want)
+			return check_fail(
+			    "%s %d ignore expected %llu, got %llu",
+			    label, id, (unsigned long long)want,
+			    (unsigned long long)f->ignore);
+		return 0;
+	}
+	if (strcmp(kind, "cond") == 0) {
+		if (arg == NULL)
+			return check_fail(
+			    "usage: check %s %d cond none|EXPR",
+			    label, id);
+		if (strcmp(arg, "none") == 0) {
+			if (f->has_cond)
+				return check_fail(
+				    "%s %d condition expected none, got"
+				    " \"%s\"", label, id, f->cond);
+			return 0;
+		}
+		if (!f->has_cond)
+			return check_fail(
+			    "%s %d condition expected \"%s\", got none",
+			    label, id, arg);
+		if (strcmp(f->cond, arg) != 0)
+			return check_fail(
+			    "%s %d condition expected \"%s\", got \"%s\"",
+			    label, id, arg, f->cond);
+		return 0;
+	}
+	return -2; /* unknown kind: caller may try state strings */
+}
+
+/*
+ * Concatenate argv[start..end) into `out` separated by single
+ * spaces, without quoting.  Used for `check bp/hwbp cond TEXT`
+ * which allows whitespace inside the condition text.  Returns
+ * 0 on success, -1 if the joined result does not fit in `cap`.
+ */
+static int
+join_args(char *out, size_t cap, char **argv, int start, int end)
+{
+	int i;
+	size_t len = 0;
+	size_t need;
+
+	if (out == NULL || cap == 0)
+		return -1;
+	out[0] = 0;
+	for (i = start; i < end; i++) {
+		need = strlen(argv[i]);
+		if (i > start) {
+			if (len + 1 >= cap)
+				return -1;
+			out[len++] = ' ';
+		}
+		if (len + need >= cap)
+			return -1;
+		memcpy(out + len, argv[i], need);
+		len += need;
+	}
+	out[len] = 0;
+	return 0;
+}
+
+static int
+check_bp(struct zdbg *d, char **argv, int argc)
+{
+	uint64_t v;
+	int id;
+	struct zbp *b;
+	int rc;
+	char joined[ZDBG_FILTER_EXPR_MAX];
+	const char *cond_arg;
+
+	/* argv[0]="bp", argv[1]=ID, argv[2]=KIND, argv[3..]=arg */
+	if (argc < 3)
+		return check_fail(
+		    "usage: check bp ID enabled|disabled|installed|"
+		    "removed|hits N|ignore N|cond ...");
+	if (zexpr_eval(argv[1], NULL, &v) < 0)
+		return check_fail("bad bp id: %s", argv[1]);
+	id = (int)v;
+	if (id < 0 || id >= ZDBG_MAX_BREAKPOINTS)
+		return check_fail("bp id out of range: %d", id);
+	b = &d->bps.bp[id];
+	if (b->state == ZBP_EMPTY)
+		return check_fail("no breakpoint %d", id);
+
+	/* `cond TEXT` permits whitespace inside TEXT: re-join argv[3..] */
+	cond_arg = NULL;
+	if (argc >= 4) {
+		if (join_args(joined, sizeof(joined), argv, 3, argc) < 0)
+			return check_fail("bp %d condition arg too long",
+			    id);
+		cond_arg = joined;
+	}
+	rc = check_filter_state("bp", id, &b->filter, argv[2], cond_arg);
+	if (rc != -2)
+		return rc;
+	return check_bp_state(d, argv[1], argv[2]);
+}
+
 static int
 check_hwbp_state(struct zdbg *d, const char *idtok, const char *state)
 {
@@ -4786,6 +5226,41 @@ check_hwbp_state(struct zdbg *d, const char *idtok, const char *state)
 		return 0;
 	}
 	return check_fail("unknown hwbp state: %s", state);
+}
+
+static int
+check_hwbp(struct zdbg *d, char **argv, int argc)
+{
+	uint64_t v;
+	int id;
+	struct zhwbp *b;
+	int rc;
+	char joined[ZDBG_FILTER_EXPR_MAX];
+	const char *cond_arg;
+
+	if (argc < 3)
+		return check_fail(
+		    "usage: check hwbp ID enabled|disabled|"
+		    "hits N|ignore N|cond ...");
+	if (zexpr_eval(argv[1], NULL, &v) < 0)
+		return check_fail("bad hwbp id: %s", argv[1]);
+	id = (int)v;
+	if (id < 0 || id >= ZDBG_MAX_HWBP)
+		return check_fail("hwbp id out of range: %d", id);
+	b = &d->hwbps.bp[id];
+	if (b->state == ZHWBP_EMPTY)
+		return check_fail("no hwbp %d", id);
+	cond_arg = NULL;
+	if (argc >= 4) {
+		if (join_args(joined, sizeof(joined), argv, 3, argc) < 0)
+			return check_fail("hwbp %d condition arg too long",
+			    id);
+		cond_arg = joined;
+	}
+	rc = check_filter_state("hwbp", id, &b->filter, argv[2], cond_arg);
+	if (rc != -2)
+		return rc;
+	return check_hwbp_state(d, argv[1], argv[2]);
 }
 
 /*
@@ -4930,15 +5405,16 @@ cmd_check(struct zdbg *d, struct toks *t)
 		if (argc < 3)
 			return check_fail(
 			    "usage: %s bp ID enabled|disabled|"
-			    "installed|removed", check_word);
-		return check_bp_state(d, argv[1], argv[2]);
+			    "installed|removed|hits N|ignore N|cond ...",
+			    check_word);
+		return check_bp(d, argv, argc);
 	}
 	if (strcmp(sub, "hwbp") == 0) {
 		if (argc < 3)
 			return check_fail(
-			    "usage: %s hwbp ID enabled|disabled",
-			    check_word);
-		return check_hwbp_state(d, argv[1], argv[2]);
+			    "usage: %s hwbp ID enabled|disabled|"
+			    "hits N|ignore N|cond ...", check_word);
+		return check_hwbp(d, argv, argc);
 	}
 	if (strcmp(sub, "file") == 0) {
 		if (argc < 3)
@@ -5096,6 +5572,12 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_hd(d, &t);
 	if (strcmp(mn, "he") == 0)
 		return cmd_he(d, &t);
+	if (strcmp(mn, "cond") == 0)
+		return cmd_cond(d, &t);
+	if (strcmp(mn, "ignore") == 0)
+		return cmd_ignore(d, &t);
+	if (strcmp(mn, "hits") == 0)
+		return cmd_hits(d, &t);
 	if (strcmp(mn, "g") == 0)
 		return cmd_g(d, &t);
 	if (strcmp(mn, "t") == 0)

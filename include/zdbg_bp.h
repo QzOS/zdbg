@@ -20,6 +20,7 @@
 
 #include "zdbg.h"
 #include "zdbg_target.h"
+#include "zdbg_filter.h"
 
 #define ZDBG_MAX_BREAKPOINTS 128
 
@@ -49,6 +50,7 @@ struct zbp {
 	uint8_t orig;
 	int temporary;
 	int installed;
+	struct zstop_filter filter;
 };
 
 struct zbp_table {
