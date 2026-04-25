@@ -19,10 +19,15 @@ zrepl_run(struct zdbg *d)
 		int rc;
 		size_t n;
 
-		printf("- ");
-		fflush(stdout);
+		if (d->quit_requested)
+			break;
+		if (!d->quiet) {
+			printf("- ");
+			fflush(stdout);
+		}
 		if (fgets(line, sizeof(line), stdin) == NULL) {
-			printf("\n");
+			if (!d->quiet)
+				printf("\n");
 			break;
 		}
 		n = strlen(line);
@@ -30,7 +35,12 @@ zrepl_run(struct zdbg *d)
 			line[--n] = 0;
 
 		rc = zcmd_exec(d, line);
+		d->last_status = rc;
+		if (rc != 0 && rc != 1)
+			d->had_error = 1;
 		if (rc == 1) /* RC_QUIT */
+			break;
+		if (d->quit_requested)
 			break;
 	}
 	return 0;

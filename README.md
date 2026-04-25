@@ -182,6 +182,73 @@ Run the debugger:
     ./build/zdbg
     ./build/zdbg ./build/examples/testprog
 
+## Command-line usage
+
+    zdbg [options] [target [args...]]
+
+    Options:
+      -x, --execute PATH   execute commands from script file
+                           (may be repeated; max 16)
+      -b, --batch          batch mode: exit after scripts/stdin
+      -q, --quiet          suppress banner and prompts
+      -v, --verbose        echo script commands before execution
+          --no-init        do not load $HOME/.zdbgrc startup file
+      -h, --help           show usage and exit
+          --version        show version and exit
+          --               end of zdbg options
+
+The target path and its arguments are remembered on the zdbg
+state so a bare `l` at the prompt (or in a script) launches it.
+Use `--` to keep the target's own dashed arguments distinct from
+zdbg options:
+
+    zdbg -x patch.zdbg -- ./prog -not-a-zdbg-option
+
+### Script syntax
+
+Scripts are line-oriented and intentionally simple:
+
+    one command per line
+    blank lines are ignored
+    full-line comments begin with `;` or `#` after leading whitespace
+    quoted paths are supported by commands that use the
+        quote-aware splitter (e.g. wf, rf, source)
+    no variables, loops, conditionals, macros, or expression
+        evaluation beyond the existing address expressions
+
+Lines must be at most 1024 bytes including the newline.  An
+over-long line is reported as `path:line: line too long` and
+stops execution.  Inline `#`/`;` are **not** treated as comments
+because paths and strings may legitimately contain them.
+
+Sourcing scripts interactively (or recursively from another
+script) is supported up to a fixed nesting depth (8):
+
+    source path
+    . path
+
+Examples:
+
+    zdbg -x examples/scripts/smoke.zdbg ./build/examples/testprog
+    zdbg --batch -q -x patch.zdbg ./target
+    zdbg --batch ./target < commands.zdbg
+
+### Startup file
+
+If `$HOME/.zdbgrc` exists it is sourced before any `-x` script.
+A missing startup file is silently ignored; failures inside it
+print a warning but are not fatal.  Pass `--no-init` to skip it.
+
+### Exit status
+
+    0  success (or interactive REPL exit)
+    1  a command failed in a script or batch session
+    2  usage error, setup error, script-file-open error, or
+       script line too long
+
+In interactive mode (no script, no `--batch`) command failures
+are reported but do not terminate the REPL.
+
 ## Command sketch
 
     ?                    help
@@ -252,6 +319,8 @@ Run the debugger:
     ex CODE pass|nopass  set pending exception continuation (guarded)
     handle [name [opts]] show/set signal stop/pass/print policy on
                          Linux, or Windows exception policy on Windows
+    source path          execute commands from script file
+    . path                alias for source
 
 Address expressions accept raw numbers (default hex), registers
 (`rip+10`), and — on Linux, after a target has been
