@@ -524,10 +524,30 @@ Symbols are refreshed automatically on `l`/`la` and after each
 `lm`.  Use `sym -r` to force a refresh (useful after the
 dynamic loader has mapped new shared libraries).
 
-Known limitations: instruction operands inside `a` / `pa` /
-interactive tiny assembly still accept only numbers and
-registers; symbol names are not resolved inside assembled
-instruction operands in this release.
+Tiny assembler operands for direct branches/calls use the same
+expression resolver as commands, so `jmp foo`, `jz main+20`, and
+`call module:symbol` work when the target is in rel8/rel32 range.
+This is still a tiny assembler: no labels, no memory operands,
+no relocation generation, no full x86 syntax.
+
+Encoding sizes are deterministic, chosen by the mnemonic:
+
+    jmp      = 5 bytes (E9 rel32)
+    call     = 5 bytes (E8 rel32)
+    jz/jnz   = 6 bytes (0F 84/85 rel32)
+    jmp8     = 2 bytes (EB rel8)
+    jz8/jnz8 = 2 bytes (74/75 rel8)
+    nop/int3/ret = 1 byte
+
+For `pa`, `len` must be at least the encoded instruction length;
+shorter encodings are NOP-filled to `len`, longer ones are
+rejected with `instruction length N exceeds patch length M`.
+Examples:
+
+    pa addr 5 jmp symbol
+    pa addr 5 call symbol
+    pa addr 6 jz symbol
+    pa addr 2 jz8 symbol
 
 Memory search (`s`) is chunked and bounded.  Region search
 (`-a` / `-r` / `-m`) skips guard pages and silently skips

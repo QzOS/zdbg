@@ -451,6 +451,28 @@ eval_addr(struct zdbg *d, const char *s, zaddr_t *out)
 	return zexpr_eval_symbols(s, &d->regs, maps, syms, out);
 }
 
+/*
+ * Operand resolver for tinyasm.  Uses the same value-aware
+ * expression evaluator as `print`/`eval_addr`, so symbols,
+ * registers, module bases, qualified `module:symbol`, and
+ * explicit u8/u16/u32/u64/ptr/poi/sN dereferences all work.
+ *
+ * Maps and symbols are refreshed lazily, mirroring eval_addr().
+ */
+static int
+asm_resolve(void *arg, const char *expr, zaddr_t *out)
+{
+	struct zdbg *d = (struct zdbg *)arg;
+	const struct zmap_table *maps;
+	const struct zsym_table *syms;
+
+	if (have_target(d) && !d->have_maps)
+		refresh_maps(d);
+	maps = d->have_maps ? &d->maps : NULL;
+	syms = d->have_syms ? &d->syms : NULL;
+	return zexpr_eval_value(expr, &d->target, &d->regs, maps, syms, out);
+}
+
 /* --- r --------------------------------------------------------- */
 static int
 cmd_r(struct zdbg *d, struct toks *t)
@@ -1822,10 +1844,15 @@ cmd_a(struct zdbg *d, struct toks *t)
 			return -1;
 		}
 	}
+	if (have_target(d)) {
+		refresh_maps(d);
+		refresh_syms(d);
+	}
 	printf("assemble at %016llx (empty line ends)\n",
 	    (unsigned long long)addr);
 	for (;;) {
 		struct ztinyasm enc;
+		char err[128];
 		size_t i;
 		printf("%016llx- ", (unsigned long long)addr);
 		if (fgets(line, sizeof(line), stdin) == NULL)
@@ -1839,8 +1866,9 @@ cmd_a(struct zdbg *d, struct toks *t)
 		}
 		if (line[0] == 0)
 			break;
-		if (ztinyasm_assemble(addr, line, &enc, &d->regs) < 0) {
-			printf("bad instruction\n");
+		if (ztinyasm_assemble_ex(addr, line, &enc, asm_resolve, d,
+		    err, sizeof(err)) < 0) {
+			printf("%s\n", err[0] ? err : "bad instruction");
 			continue;
 		}
 		printf("   ");
@@ -1881,10 +1909,18 @@ cmd_pa(struct zdbg *d, struct toks *t)
 		printf("bad length\n");
 		return -1;
 	}
-	if (ztinyasm_patch(addr, (size_t)len, rest_from(t->orig, 3), buf,
-	    sizeof(buf), &out_len, &d->regs) < 0) {
-		printf("assemble failed\n");
-		return -1;
+	if (have_target(d)) {
+		refresh_maps(d);
+		refresh_syms(d);
+	}
+	{
+		char err[128];
+		if (ztinyasm_patch_ex(addr, (size_t)len,
+		    rest_from(t->orig, 3), buf, sizeof(buf), &out_len,
+		    asm_resolve, d, err, sizeof(err)) < 0) {
+			printf("%s\n", err[0] ? err : "assemble failed");
+			return -1;
+		}
 	}
 	{
 		size_t i;
