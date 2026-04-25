@@ -985,7 +985,10 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
 	}
 	if (strcmp(opt, "-u32") == 0) {
 		zaddr_t v;
-		if (i + 1 >= argc || eval_addr(d, argv[i + 1], &v) < 0) {
+		if (i + 1 >= argc ||
+		    zexpr_eval_value(argv[i + 1], &d->target, &d->regs,
+		    d->have_maps ? &d->maps : NULL,
+		    d->have_syms ? &d->syms : NULL, &v) < 0) {
 			printf("bad -u32 value\n");
 			return -1;
 		}
@@ -995,7 +998,10 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
 	}
 	if (strcmp(opt, "-u64") == 0) {
 		zaddr_t v;
-		if (i + 1 >= argc || eval_addr(d, argv[i + 1], &v) < 0) {
+		if (i + 1 >= argc ||
+		    zexpr_eval_value(argv[i + 1], &d->target, &d->regs,
+		    d->have_maps ? &d->maps : NULL,
+		    d->have_syms ? &d->syms : NULL, &v) < 0) {
 			printf("bad -u64 value\n");
 			return -1;
 		}
@@ -1005,7 +1011,10 @@ parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
 	}
 	if (strcmp(opt, "-ptr") == 0) {
 		zaddr_t v;
-		if (i + 1 >= argc || eval_addr(d, argv[i + 1], &v) < 0) {
+		if (i + 1 >= argc ||
+		    zexpr_eval_value(argv[i + 1], &d->target, &d->regs,
+		    d->have_maps ? &d->maps : NULL,
+		    d->have_syms ? &d->syms : NULL, &v) < 0) {
 			printf("bad -ptr expression\n");
 			return -1;
 		}
@@ -2726,6 +2735,116 @@ cmd_printf(struct zdbg *d, struct toks *t)
 }
 
 /*
+ * print [/x|/d|/a] EXPR
+ * eval  [/x|/d|/a] EXPR
+ *
+ * Evaluate EXPR through zexpr_eval_value() and print the
+ * result.  Supports explicit target-memory dereference
+ * (`u8/u16/u32/u64/ptr(EXPR)`) so callers can inspect counters,
+ * stack slots, etc.
+ *
+ * Default output is hex address followed by symbol annotation
+ * when available and decimal value:
+ *
+ *     0000555555555174 <main> #21882250612
+ *
+ * `/x` suppresses the decimal, `/d` suppresses the hex form
+ * and prints decimal only, `/a` adds containing-map info when
+ * the value falls inside a known map/region.
+ */
+static int
+cmd_print(struct zdbg *d, struct toks *t)
+{
+	const char *name = (t->n >= 1) ? t->v[0] : "print";
+	const char *expr;
+	int argi = 1;
+	int show_hex = 1;
+	int show_dec = 1;
+	int show_addr = 0;
+	zaddr_t v;
+	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+	const struct zmap *m = NULL;
+	const struct zmap *r = NULL;
+
+	if (t->n < 2) {
+		printf("usage: %s [/x|/d|/a] EXPR\n", name);
+		return -1;
+	}
+	if (t->v[argi][0] == '/' && t->v[argi][1] != 0 &&
+	    t->v[argi][2] == 0) {
+		switch (t->v[argi][1]) {
+		case 'x':
+			show_dec = 0;
+			break;
+		case 'd':
+			show_hex = 0;
+			break;
+		case 'a':
+			show_addr = 1;
+			break;
+		default:
+			printf("usage: %s [/x|/d|/a] EXPR\n", name);
+			return -1;
+		}
+		argi++;
+		if (argi >= t->n) {
+			printf("usage: %s [/x|/d|/a] EXPR\n", name);
+			return -1;
+		}
+	}
+	/* Use the rest of the original input so multi-token
+	 * expressions like `u32 ( counter )` survive through the
+	 * tokeniser.  When a /flag was consumed start at argi. */
+	expr = rest_from(t->orig, argi);
+	while (*expr == ' ' || *expr == '\t')
+		expr++;
+	if (*expr == 0) {
+		printf("usage: %s [/x|/d|/a] EXPR\n", name);
+		return -1;
+	}
+
+	{
+		const struct zmap_table *mt;
+		const struct zsym_table *syt;
+
+		if (have_target(d) && !d->have_maps)
+			refresh_maps(d);
+		mt = d->have_maps ? &d->maps : NULL;
+		syt = d->have_syms ? &d->syms : NULL;
+		if (zexpr_eval_value(expr, &d->target, &d->regs,
+		    mt, syt, &v) < 0) {
+			printf("bad expression\n");
+			return -1;
+		}
+	}
+	annot_addr(d, v, ann, sizeof(ann));
+	if (show_hex)
+		printf("%016llx%s", (unsigned long long)v, ann);
+	if (show_hex && show_dec)
+		printf(" #%llu", (unsigned long long)v);
+	else if (!show_hex)
+		printf("#%llu", (unsigned long long)v);
+	if (show_addr) {
+		if (have_target(d) && !d->have_regions)
+			refresh_regions(d);
+		if (d->have_maps)
+			m = zmaps_find_by_addr(&d->maps, v);
+		if (d->have_regions)
+			r = zmaps_find_by_addr(&d->regions, v);
+		if (m != NULL)
+			printf(" %s", m->name);
+		if (r != NULL) {
+			if (m == NULL || strcmp(m->name, r->name) != 0)
+				printf(" %s", r->name);
+			printf(" %s %s", r->perms,
+			    zmaps_mem_type_str(r->mem_type));
+		}
+	}
+	printf("\n");
+	return 0;
+}
+
+/*
  * trace b ADDR [TEXT...]   create a software tracepoint
  * trace h ID   [TEXT...]   make an existing hwbp into a tracepoint
  *
@@ -3150,8 +3269,8 @@ cmd_run_and_wait(struct zdbg *d, int step)
 					    d->have_maps ? &d->maps : NULL;
 					const struct zsym_table *syt =
 					    d->have_syms ? &d->syms : NULL;
-					if (zcond_eval(flt->cond, &d->regs,
-					    mt, syt, &cres) < 0) {
+					if (zcond_eval(flt->cond, &d->target,
+					    &d->regs, mt, syt, &cres) < 0) {
 						printf("condition evaluation"
 						    " failed: %s\n",
 						    flt->cond);
@@ -5874,6 +5993,37 @@ check_file(const char *path, const char *kind, const char *arg)
 	return check_fail("unknown file check: %s", kind);
 }
 
+/*
+ * `check expr CONDITION` runs the same condition evaluator
+ * used by breakpoint conditions (so `==`, `!=`, `<`, `<=`,
+ * `>`, `>=` and bare-EXPR are supported, including the new
+ * memory-dereference forms `u8/u16/u32/u64/ptr(EXPR)`).
+ *
+ * `cond` is the raw condition text from the user; it is used
+ * verbatim in the failure message so the diagnostic is
+ * meaningful.
+ */
+static int
+check_expr(struct zdbg *d, const char *cond)
+{
+	const struct zmap_table *mt;
+	const struct zsym_table *syt;
+	int res = 0;
+
+	if (cond == NULL || *cond == 0)
+		return check_fail("usage: %s expr CONDITION",
+		    check_word);
+	if (have_target(d) && !d->have_maps)
+		refresh_maps(d);
+	mt = d->have_maps ? &d->maps : NULL;
+	syt = d->have_syms ? &d->syms : NULL;
+	if (zcond_eval(cond, &d->target, &d->regs, mt, syt, &res) < 0)
+		return check_fail("bad expression: %s", cond);
+	if (!res)
+		return check_fail("expression false: %s", cond);
+	return 0;
+}
+
 static int
 cmd_check(struct zdbg *d, struct toks *t)
 {
@@ -5920,6 +6070,24 @@ cmd_check(struct zdbg *d, struct toks *t)
 			return check_fail("usage: %s stop REASON",
 			    check_word);
 		return check_stop(d, argv[1]);
+	}
+	if (strcmp(sub, "expr") == 0) {
+		/* Pull the raw condition text from the original
+		 * input so quoted/whitespace forms survive intact. */
+		const char *orig = t->orig;
+		/* skip the command word */
+		while (*orig == ' ' || *orig == '\t')
+			orig++;
+		while (*orig && *orig != ' ' && *orig != '\t')
+			orig++;
+		while (*orig == ' ' || *orig == '\t')
+			orig++;
+		/* skip "expr" */
+		if (strncmp(orig, "expr", 4) == 0)
+			orig += 4;
+		while (*orig == ' ' || *orig == '\t')
+			orig++;
+		return check_expr(d, orig);
 	}
 	if (strcmp(sub, "thread") == 0)
 		return check_thread(d, argc >= 2 ? argv[1] : NULL);
@@ -6157,6 +6325,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 	}
 	if (strcmp(mn, "printf") == 0)
 		return cmd_printf(d, &t);
+	if (strcmp(mn, "print") == 0 || strcmp(mn, "eval") == 0)
+		return cmd_print(d, &t);
 	if (strcmp(mn, "g") == 0)
 		return cmd_g(d, &t);
 	if (strcmp(mn, "t") == 0)

@@ -27,6 +27,14 @@
 #include "zdbg_expr.h"
 #include "zdbg_maps.h"
 #include "zdbg_symbols.h"
+#include "zdbg_target.h"
+
+/*
+ * Maximum length of an inner expression accepted by the value
+ * evaluator.  Large enough to hold any practical
+ * register+symbol+offset combination.
+ */
+#define ZEXPR_VALUE_BUF 256
 
 static int
 is_regchar(int c)
@@ -627,4 +635,311 @@ zexpr_eval_symbols(const char *s, const struct zregs *regs,
 
 	/* Fall back to mapping base lookup (e.g. plain "libc"). */
 	return zexpr_eval_maps(s, regs, maps, out);
+}
+
+/* --- value evaluator (explicit target-memory dereference) ------ */
+
+/*
+ * Trim leading and trailing whitespace from [s, s+n) into a
+ * caller-supplied buffer `dst` of capacity `cap`.  Returns 0 on
+ * success and -1 if the trimmed string would not fit (or is
+ * empty).
+ */
+static int
+trim_to(const char *s, size_t n, char *dst, size_t cap)
+{
+	size_t i = 0;
+
+	while (i < n && (s[i] == ' ' || s[i] == '\t'))
+		i++;
+	while (n > i && (s[n - 1] == ' ' || s[n - 1] == '\t'))
+		n--;
+	if (n <= i)
+		return -1;
+	if ((n - i) >= cap)
+		return -1;
+	memcpy(dst, s + i, n - i);
+	dst[n - i] = 0;
+	return 0;
+}
+
+/*
+ * Recognise a deref keyword starting at p.  Returns the byte
+ * width (1/2/4/8), writes 1 to *signp for signed forms, and
+ * advances *pp past the keyword and any whitespace up to '('.
+ * Returns 0 if no keyword matches.
+ */
+static int
+match_deref_kw(const char **pp, int *signp)
+{
+	const char *p = *pp;
+	struct kw {
+		const char *name;
+		int width;
+		int sign;
+	};
+	static const struct kw table[] = {
+		{ "u8",  1, 0 },
+		{ "u16", 2, 0 },
+		{ "u32", 4, 0 },
+		{ "u64", 8, 0 },
+		{ "ptr", 8, 0 },
+		{ "poi", 8, 0 },
+		{ "s8",  1, 1 },
+		{ "s16", 2, 1 },
+		{ "s32", 4, 1 },
+		{ NULL,  0, 0 }
+	};
+	int i;
+
+	for (i = 0; table[i].name != NULL; i++) {
+		size_t kl = strlen(table[i].name);
+		if (strncmp(p, table[i].name, kl) != 0)
+			continue;
+		{
+			const char *q = p + kl;
+			while (*q == ' ' || *q == '\t')
+				q++;
+			if (*q != '(')
+				continue;
+			*pp = q;	/* points at '(' */
+			*signp = table[i].sign;
+			return table[i].width;
+		}
+	}
+	return 0;
+}
+
+/*
+ * Find the offset of the matching ')' for the '(' at *p (which
+ * must point at '(').  Tracks nested parens.  Returns the
+ * offset relative to *p of the matching ')' on success and -1
+ * if the parens do not balance.
+ */
+static int
+find_matching_paren(const char *p)
+{
+	int depth = 0;
+	int i = 0;
+
+	if (p[0] != '(')
+		return -1;
+	for (;;) {
+		char c = p[i];
+		if (c == 0)
+			return -1;
+		if (c == '(')
+			depth++;
+		else if (c == ')') {
+			depth--;
+			if (depth == 0)
+				return i;
+		}
+		i++;
+	}
+}
+
+/*
+ * Find the first top-level '+' or '-' in `s` that is outside
+ * any parenthesised group and that is not part of an identifier
+ * (sign-belongs-to-ident from the existing parser).  The first
+ * character is never considered (so a leading sign is treated
+ * as part of the term).  Returns NULL when no such operator
+ * exists.
+ */
+static const char *
+find_top_arith_op(const char *s)
+{
+	int depth = 0;
+	const char *p;
+
+	for (p = s; *p; p++) {
+		if (*p == '(') {
+			depth++;
+			continue;
+		}
+		if (*p == ')') {
+			if (depth > 0)
+				depth--;
+			continue;
+		}
+		if (depth != 0)
+			continue;
+		if (p == s)
+			continue;
+		if (*p != '+' && *p != '-')
+			continue;
+		if (sign_belongs_to_ident(p))
+			continue;
+		return p;
+	}
+	return NULL;
+}
+
+/*
+ * Decode `n` little-endian bytes from `b` into an unsigned
+ * 64-bit value.  `n` is 1, 2, 4 or 8.
+ */
+static uint64_t
+decode_le(const uint8_t *b, int n)
+{
+	uint64_t v = 0;
+	int i;
+
+	for (i = 0; i < n; i++)
+		v |= (uint64_t)b[i] << (i * 8);
+	return v;
+}
+
+/*
+ * Sign-extend `v` from `width` bytes to a signed 64-bit value
+ * and return as uint64_t bits.
+ */
+static uint64_t
+sign_extend(uint64_t v, int width)
+{
+	uint64_t mask;
+	uint64_t sign;
+
+	if (width >= 8)
+		return v;
+	mask = ((uint64_t)1 << (width * 8)) - 1;
+	sign = (uint64_t)1 << (width * 8 - 1);
+	v &= mask;
+	if (v & sign)
+		v |= ~mask;
+	return v;
+}
+
+static int eval_value_term(const char *s, size_t len,
+    const struct zregs *regs, const struct zmap_table *maps,
+    const struct zsym_table *syms,
+    zexpr_readmem_fn readfn, void *readarg, zaddr_t *out);
+
+/*
+ * Evaluate a single value term.  A term is either a deref
+ * `FUNC(EXPR)` (with optional whitespace before/after the
+ * parens) or a plain expression accepted by zexpr_eval_symbols.
+ */
+static int
+eval_value_term(const char *s, size_t len, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zexpr_readmem_fn readfn, void *readarg, zaddr_t *out)
+{
+	char buf[ZEXPR_VALUE_BUF];
+	const char *p;
+	const char *kp;
+	int width;
+	int is_signed = 0;
+	int paren_off;
+	zaddr_t addr = 0;
+	uint8_t mb[8];
+
+	if (trim_to(s, len, buf, sizeof(buf)) < 0)
+		return -1;
+
+	p = buf;
+	kp = p;
+	width = match_deref_kw(&kp, &is_signed);
+	if (width != 0) {
+		/* Must be FUNC( ... ) at the start, with only optional
+		 * trailing whitespace after the closing paren. */
+		paren_off = find_matching_paren(kp);
+		if (paren_off < 0)
+			return -1;
+		{
+			const char *tail = kp + paren_off + 1;
+			while (*tail == ' ' || *tail == '\t')
+				tail++;
+			if (*tail != 0)
+				return -1;
+		}
+		/* Inner expression. */
+		if (eval_value_term(kp + 1, (size_t)(paren_off - 1),
+		    regs, maps, syms, readfn, readarg, &addr) < 0)
+			return -1;
+		if (readfn == NULL)
+			return -1;
+		if (readfn(readarg, addr, mb, (size_t)width) < 0) {
+			fprintf(stderr,
+			    "cannot read u%d at %016llx\n",
+			    width * 8, (unsigned long long)addr);
+			return -1;
+		}
+		{
+			uint64_t v = decode_le(mb, width);
+			if (is_signed)
+				v = sign_extend(v, width);
+			*out = (zaddr_t)v;
+		}
+		return 0;
+	}
+
+	/* Not a deref: defer to the symbol-aware evaluator. */
+	return zexpr_eval_symbols(buf, regs, maps, syms, out);
+}
+
+int
+zexpr_eval_value_cb(const char *s, const struct zregs *regs,
+    const struct zmap_table *maps, const struct zsym_table *syms,
+    zexpr_readmem_fn readfn, void *readarg, zaddr_t *out)
+{
+	const char *op;
+	zaddr_t lhs = 0;
+	zaddr_t rhs = 0;
+
+	if (s == NULL || out == NULL)
+		return -1;
+
+	/*
+	 * Fast path: if the existing symbol-aware evaluator can
+	 * handle it (numbers, registers, symbols, modules, single
+	 * +/-), use that result directly.  This preserves all
+	 * legacy semantics including `main+1000` mapping-relative.
+	 */
+	if (zexpr_eval_symbols(s, regs, maps, syms, out) == 0)
+		return 0;
+
+	/* Slow path: at least one deref is involved. */
+	op = find_top_arith_op(s);
+	if (op == NULL)
+		return eval_value_term(s, strlen(s), regs, maps, syms,
+		    readfn, readarg, out);
+
+	if (eval_value_term(s, (size_t)(op - s), regs, maps, syms,
+	    readfn, readarg, &lhs) < 0)
+		return -1;
+	if (eval_value_term(op + 1, strlen(op + 1), regs, maps, syms,
+	    readfn, readarg, &rhs) < 0)
+		return -1;
+	if (*op == '+')
+		*out = (zaddr_t)((uint64_t)lhs + (uint64_t)rhs);
+	else
+		*out = (zaddr_t)((uint64_t)lhs - (uint64_t)rhs);
+	return 0;
+}
+
+/*
+ * ztarget-backed adapter for the read callback.  Defined here
+ * so the value evaluator only depends on a forward-declared
+ * struct ztarget at the API boundary.
+ */
+static int
+target_readmem_cb(void *arg, zaddr_t addr, void *buf, size_t len)
+{
+	struct ztarget *t = (struct ztarget *)arg;
+
+	return ztarget_read(t, addr, buf, len);
+}
+
+int
+zexpr_eval_value(const char *s, struct ztarget *t,
+    const struct zregs *regs, const struct zmap_table *maps,
+    const struct zsym_table *syms, zaddr_t *out)
+{
+	if (s == NULL || out == NULL)
+		return -1;
+	return zexpr_eval_value_cb(s, regs, maps, syms,
+	    t != NULL ? target_readmem_cb : NULL,
+	    (void *)t, out);
 }
