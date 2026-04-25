@@ -21,6 +21,7 @@
 #include "zdbg.h"
 #include "zdbg_target.h"
 #include "zdbg_filter.h"
+#include "zdbg_actions.h"
 
 #define ZDBG_MAX_BREAKPOINTS 128
 
@@ -51,6 +52,7 @@ struct zbp {
 	int temporary;
 	int installed;
 	struct zstop_filter filter;
+	struct zaction_list actions;
 };
 
 struct zbp_table {

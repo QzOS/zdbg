@@ -278,8 +278,10 @@ REPL keeps running.
     check patch id applied|reverted patch state matches
     check bp id enabled|disabled|installed|removed
     check bp id hits N|ignore N|cond none|EXPR
+    check bp id actions N|silent yes|no
     check hwbp id enabled|disabled
     check hwbp id hits N|ignore N|cond none|EXPR
+    check hwbp id actions N|silent yes|no
     check file path exists          host file exists (quoted paths ok)
     check file path size n          host file is exactly n bytes long
     assert ...                      alias for check
@@ -357,6 +359,16 @@ A simple smoke and patch script live under
     ignore b|h id count  ignore next count hits
     hits b|h id [reset]  show/reset hit count
     hits b|h * reset     reset every breakpoint of that kind
+    actions b|h id                  show action list
+    actions b|h id add LINE...      append action line
+    actions b|h id del N            delete action line
+    actions b|h id clear            clear actions and silent flag
+    actions b|h id silent on|off    suppress normal stop line
+    commands b|h id ...             alias for actions
+    trace b ADDR [TEXT...]          create silent software tracepoint
+    trace h ID   [TEXT...]          turn existing hwbp into tracepoint
+    printf TEXT...                  print literal text (\n \t \r \\ \"
+                                    \xNN escapes; no format substitution)
     lm [-m|-r] [addr]    list maps/regions or show containing entry
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
     addr expr            show address, nearest symbol, containing map
@@ -495,6 +507,46 @@ debugger stops with a diagnostic instead of silently running.
 Limitations: no boolean operators (`&&`, `||`), no parentheses,
 no memory dereference in conditions, no command lists, no
 thread-specific conditions.
+
+Breakpoint action lists run a small bounded sequence of
+commands when a hit passes the stop filter.  They are
+deliberately not a scripting language: there are no variables,
+loops, conditionals, macros, command-list nesting, or
+thread-specific lists.  Each list is at most 8 lines of up to
+160 characters.  The `silent` flag suppresses the normal stop
+output for that hit so tracepoint-style "log and continue"
+workflows produce only the lines they print themselves.  A
+special `continue` (alias `cont`) action resumes the target
+without recursively running `g`; software breakpoints reuse
+the same restore / single-step / reinsert path as
+ignored/condition-false hits.
+
+Allowed action commands:
+
+    r u d x addr bt lm sym th pl hl b hits check assert
+    expect printf silent continue cont
+
+Disallowed in action lists (rejected with `action rejected:`):
+
+    g t p l la ld k q source . bc bd be hb hw hc hd he
+    cond ignore actions commands trace pa ij a e f m rf wf
+    pw pu pr ps pf sig ex handle
+
+`b` is allowed only as a list command; `b ADDR` would create a
+new breakpoint mid-stop and is rejected.  Filters run before
+actions: ignored and condition-false hits do not run actions.
+Condition-evaluation failure stops the debugger and skips
+actions.  An action that fails stops execution and returns
+command failure regardless of any later `continue` action.
+
+`trace b ADDR [TEXT...]` creates a software breakpoint with
+`silent on` and a default action list of `printf TEXT` followed
+by `continue`.  `trace h ID [TEXT...]` configures an existing
+hardware breakpoint/watchpoint slot the same way.  When TEXT is
+omitted a default `trace bp N hit` / `trace hwbp N hit` message
+is used.  `printf TEXT...` prints the rest of the line followed
+by a newline; the small backslash escapes `\n \t \r \\ \" \xNN`
+are recognised and there are no format substitutions.
 
 Patch persistence (`pw`) writes raw file bytes only.  It does
 not update ELF/PE metadata, relocations, checksums, signatures,

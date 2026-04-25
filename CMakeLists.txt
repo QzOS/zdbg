@@ -20,6 +20,7 @@ set(ZDBG_CORE_SOURCES
     src/bp.c
     src/hwbp.c
     src/filter.c
+    src/actions.c
     src/maps.c
     src/symbols.c
     src/tinyasm.c

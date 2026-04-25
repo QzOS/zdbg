@@ -28,6 +28,7 @@
 #include "zdbg_tinydis.h"
 #include "zdbg_patch.h"
 #include "zdbg_filter.h"
+#include "zdbg_actions.h"
 
 #define RC_QUIT 1
 
@@ -154,6 +155,11 @@ print_help(void)
 	    "  cond b|h id clear    clear condition\n"
 	    "  ignore b|h id count  ignore next count hits\n"
 	    "  hits b|h id [reset]  show/reset hit count\n"
+	    "  actions b|h id [add LINE|del N|clear|silent on|off]\n"
+	    "                       show/edit breakpoint action list\n"
+	    "  trace b ADDR [TEXT]  create silent software tracepoint\n"
+	    "  trace h ID [TEXT]    convert hwbp/watchpoint to tracepoint\n"
+	    "  printf TEXT...       print literal text (\\n \\t \\xNN)\n"
 	    "  lm [addr]            list maps or show map at addr\n"
 	    "  sym [filter|-r]      list/search/refresh ELF symbols\n"
 	    "  addr expr            show address, nearest symbol, mapping\n"
@@ -2182,13 +2188,22 @@ cmd_hl(struct zdbg *d, struct toks *t)
 			    b->filter.cond);
 		else
 			snprintf(cond, sizeof(cond), "cond=none");
-		printf(" %d %s %s len=%d hits=%llu ignore=%llu %s"
-		    " %016llx%s\n",
-		    i, s, kname, b->len,
-		    (unsigned long long)b->filter.hits,
-		    (unsigned long long)b->filter.ignore,
-		    cond,
-		    (unsigned long long)b->addr, ann);
+		{
+			char act[32];
+			if (b->actions.silent)
+				snprintf(act, sizeof(act),
+				    "actions=%d silent", b->actions.count);
+			else
+				snprintf(act, sizeof(act), "actions=%d",
+				    b->actions.count);
+			printf(" %d %s %s len=%d hits=%llu ignore=%llu %s %s"
+			    " %016llx%s\n",
+			    i, s, kname, b->len,
+			    (unsigned long long)b->filter.hits,
+			    (unsigned long long)b->filter.ignore,
+			    cond, act,
+			    (unsigned long long)b->addr, ann);
+		}
 		any = 1;
 	}
 	if (!any)
@@ -2455,6 +2470,412 @@ cmd_hits(struct zdbg *d, struct toks *t)
 	return 0;
 }
 
+/* --- actions / printf / trace --------------------------------- */
+
+/*
+ * Look up a "b" or "h" subject and resolve the breakpoint id,
+ * returning a pointer to its action list.  Returns 0 on success
+ * and -1 on a bad subject token, bad id, or empty slot.
+ */
+static int
+actions_resolve(struct zdbg *d, const char *which, const char *idtok,
+    struct zaction_list **ap, const char **labelp, int *idp)
+{
+	uint64_t v;
+
+	if (which == NULL || idtok == NULL || ap == NULL ||
+	    labelp == NULL || idp == NULL)
+		return -1;
+	if (strcmp(which, "b") == 0) {
+		if (zexpr_eval(idtok, NULL, &v) < 0)
+			return -1;
+		if (v >= ZDBG_MAX_BREAKPOINTS)
+			return -1;
+		if (d->bps.bp[v].state == ZBP_EMPTY)
+			return -1;
+		*ap = &d->bps.bp[v].actions;
+		*labelp = "bp";
+		*idp = (int)v;
+		return 0;
+	}
+	if (strcmp(which, "h") == 0) {
+		if (zexpr_eval(idtok, NULL, &v) < 0)
+			return -1;
+		if (v >= ZDBG_MAX_HWBP)
+			return -1;
+		if (d->hwbps.bp[v].state == ZHWBP_EMPTY)
+			return -1;
+		*ap = &d->hwbps.bp[v].actions;
+		*labelp = "hwbp";
+		*idp = (int)v;
+		return 0;
+	}
+	return -1;
+}
+
+static void
+actions_print(const char *label, int id, const struct zaction_list *a)
+{
+	int i;
+
+	printf("%s %d actions: silent=%s count=%d\n", label, id,
+	    a->silent ? "yes" : "no", a->count);
+	for (i = 0; i < a->count; i++)
+		printf("  %d %s\n", i, a->lines[i]);
+}
+
+/*
+ * actions b|h ID                 show action list
+ * actions b|h ID add LINE...     append action line
+ * actions b|h ID del INDEX       delete action line
+ * actions b|h ID set INDEX LINE  replace action line
+ * actions b|h ID clear           clear actions and silent flag
+ * actions b|h ID silent on|off   set silent flag
+ */
+static int
+cmd_actions(struct zdbg *d, struct toks *t)
+{
+	struct zaction_list *a = NULL;
+	const char *label = "?";
+	int id = -1;
+	const char *sub;
+	const char *line;
+
+	if (t->n < 3) {
+		printf("usage: actions b|h ID [add LINE|del N|set N LINE|"
+		    "clear|silent on|off]\n");
+		return -1;
+	}
+	if (actions_resolve(d, t->v[1], t->v[2], &a, &label, &id) < 0) {
+		printf("actions: bad subject or id\n");
+		return -1;
+	}
+	if (t->n == 3) {
+		actions_print(label, id, a);
+		return 0;
+	}
+	sub = t->v[3];
+	if (strcmp(sub, "clear") == 0) {
+		zactions_clear(a);
+		printf("%s %d actions cleared\n", label, id);
+		return 0;
+	}
+	if (strcmp(sub, "silent") == 0) {
+		if (t->n < 5) {
+			printf("usage: actions b|h ID silent on|off\n");
+			return -1;
+		}
+		if (strcmp(t->v[4], "on") == 0)
+			zactions_set_silent(a, 1);
+		else if (strcmp(t->v[4], "off") == 0)
+			zactions_set_silent(a, 0);
+		else {
+			printf("usage: actions b|h ID silent on|off\n");
+			return -1;
+		}
+		printf("%s %d silent=%s\n", label, id,
+		    a->silent ? "yes" : "no");
+		return 0;
+	}
+	if (strcmp(sub, "del") == 0) {
+		uint64_t idx;
+		if (t->n < 5 || zexpr_eval(t->v[4], NULL, &idx) < 0) {
+			printf("usage: actions b|h ID del INDEX\n");
+			return -1;
+		}
+		if (zactions_del(a, (int)idx) < 0) {
+			printf("actions: bad index\n");
+			return -1;
+		}
+		return 0;
+	}
+	if (strcmp(sub, "add") == 0) {
+		line = rest_from(t->orig, 4);
+		while (*line == ' ' || *line == '\t')
+			line++;
+		if (*line == 0) {
+			printf("usage: actions b|h ID add LINE...\n");
+			return -1;
+		}
+		/* Bare `silent` adds a flag rather than a line. */
+		{
+			const char *p = line;
+			while (*p == ' ' || *p == '\t')
+				p++;
+			if ((p[0] == 's' || p[0] == 'S') &&
+			    (p[1] == 'i' || p[1] == 'I') &&
+			    (p[2] == 'l' || p[2] == 'L') &&
+			    (p[3] == 'e' || p[3] == 'E') &&
+			    (p[4] == 'n' || p[4] == 'N') &&
+			    (p[5] == 't' || p[5] == 'T') &&
+			    (p[6] == 0 || p[6] == ' ' || p[6] == '\t')) {
+				zactions_set_silent(a, 1);
+				return 0;
+			}
+		}
+		if (!zactions_is_allowed(line)) {
+			printf("action rejected: command not allowed in"
+			    " breakpoint action list: %s\n", line);
+			return -1;
+		}
+		if (zactions_add(a, line) < 0) {
+			printf("actions: line too long or list full\n");
+			return -1;
+		}
+		return 0;
+	}
+	if (strcmp(sub, "set") == 0) {
+		uint64_t idx;
+		if (t->n < 6 || zexpr_eval(t->v[4], NULL, &idx) < 0) {
+			printf("usage: actions b|h ID set INDEX LINE...\n");
+			return -1;
+		}
+		line = rest_from(t->orig, 5);
+		while (*line == ' ' || *line == '\t')
+			line++;
+		if (*line == 0) {
+			printf("usage: actions b|h ID set INDEX LINE...\n");
+			return -1;
+		}
+		if (!zactions_is_allowed(line)) {
+			printf("action rejected: command not allowed in"
+			    " breakpoint action list: %s\n", line);
+			return -1;
+		}
+		if (zactions_set(a, (int)idx, line) < 0) {
+			printf("actions: bad index or line too long\n");
+			return -1;
+		}
+		return 0;
+	}
+	printf("usage: actions b|h ID [add LINE|del N|set N LINE|"
+	    "clear|silent on|off]\n");
+	return -1;
+}
+
+/*
+ * Decode a hex digit; returns -1 for non-hex.
+ */
+static int
+hex_digit(int c)
+{
+	if (c >= '0' && c <= '9')
+		return c - '0';
+	if (c >= 'a' && c <= 'f')
+		return 10 + (c - 'a');
+	if (c >= 'A' && c <= 'F')
+		return 10 + (c - 'A');
+	return -1;
+}
+
+/*
+ * printf TEXT...
+ *
+ * Print the rest of the line followed by a newline.  Recognises
+ * a small set of C-style backslash escapes: \n \t \r \\ \" and
+ * \xNN.  No format substitutions: the text is literal.
+ */
+static int
+cmd_printf(struct zdbg *d, struct toks *t)
+{
+	const char *p;
+	int hi;
+	int lo;
+
+	(void)d;
+	p = rest_from(t->orig, 1);
+	/* Do not skip the leading whitespace: `printf <space>foo`
+	 * preserves the explicit space.  However a single token
+	 * after the keyword would yield t->n >= 2 and rest_from
+	 * already starts at that token.  When the user typed only
+	 * `printf` with no args, just emit a newline. */
+	for (; *p; p++) {
+		if (*p != '\\') {
+			fputc((unsigned char)*p, stdout);
+			continue;
+		}
+		switch (p[1]) {
+		case 'n': fputc('\n', stdout); p++; break;
+		case 't': fputc('\t', stdout); p++; break;
+		case 'r': fputc('\r', stdout); p++; break;
+		case '\\': fputc('\\', stdout); p++; break;
+		case '"': fputc('"', stdout); p++; break;
+		case 'x':
+			hi = hex_digit((unsigned char)p[2]);
+			lo = hex_digit((unsigned char)p[3]);
+			if (hi < 0 || lo < 0) {
+				/* malformed: emit literally */
+				fputc('\\', stdout);
+				continue;
+			}
+			fputc((hi << 4) | lo, stdout);
+			p += 3;
+			break;
+		case 0:
+			fputc('\\', stdout);
+			break;
+		default:
+			fputc('\\', stdout);
+			fputc((unsigned char)p[1], stdout);
+			p++;
+			break;
+		}
+	}
+	fputc('\n', stdout);
+	return 0;
+}
+
+/*
+ * trace b ADDR [TEXT...]   create a software tracepoint
+ * trace h ID   [TEXT...]   make an existing hwbp into a tracepoint
+ *
+ * A tracepoint is just a breakpoint/watchpoint with silent=on
+ * and a default action list of `printf <message>` followed by
+ * `continue`.  Existing actions on the slot are replaced.
+ */
+static int
+cmd_trace(struct zdbg *d, struct toks *t)
+{
+	struct zaction_list *a;
+	zaddr_t addr;
+	int id;
+	const char *msg;
+	const char *sub;
+	char line[ZDBG_ACTION_LINE_MAX];
+
+	if (t->n < 3) {
+		printf("usage: trace b ADDR [TEXT...] | trace h ID"
+		    " [TEXT...]\n");
+		return -1;
+	}
+	sub = t->v[1];
+	if (strcmp(sub, "b") == 0) {
+		if (eval_addr(d, t->v[2], &addr) < 0) {
+			printf("bad address\n");
+			return -1;
+		}
+		id = zbp_alloc(&d->bps, addr, 0);
+		if (id < 0) {
+			printf("breakpoint table full\n");
+			return -1;
+		}
+		if (have_target(d))
+			(void)zbp_enable(&d->target, &d->bps, id);
+		else
+			d->bps.bp[id].state = ZBP_ENABLED;
+		a = &d->bps.bp[id].actions;
+		zactions_clear(a);
+		zactions_set_silent(a, 1);
+		msg = (t->n >= 4) ? rest_from(t->orig, 3) : NULL;
+		if (msg != NULL)
+			while (*msg == ' ' || *msg == '\t')
+				msg++;
+		if (msg != NULL && *msg)
+			snprintf(line, sizeof(line), "printf %s", msg);
+		else
+			snprintf(line, sizeof(line),
+			    "printf trace bp %d hit", id);
+		if (zactions_add(a, line) < 0) {
+			printf("trace: message too long\n");
+			(void)zbp_clear(&d->target, &d->bps, id);
+			return -1;
+		}
+		(void)zactions_add(a, "continue");
+		printf("trace bp %d at %016llx\n", id,
+		    (unsigned long long)addr);
+		return 0;
+	}
+	if (strcmp(sub, "h") == 0) {
+		uint64_t v;
+		if (zexpr_eval(t->v[2], NULL, &v) < 0 ||
+		    v >= ZDBG_MAX_HWBP) {
+			printf("bad hwbp id\n");
+			return -1;
+		}
+		id = (int)v;
+		if (d->hwbps.bp[id].state == ZHWBP_EMPTY) {
+			printf("no hardware breakpoint %d\n", id);
+			return -1;
+		}
+		a = &d->hwbps.bp[id].actions;
+		zactions_clear(a);
+		zactions_set_silent(a, 1);
+		msg = (t->n >= 4) ? rest_from(t->orig, 3) : NULL;
+		if (msg != NULL)
+			while (*msg == ' ' || *msg == '\t')
+				msg++;
+		if (msg != NULL && *msg)
+			snprintf(line, sizeof(line), "printf %s", msg);
+		else
+			snprintf(line, sizeof(line),
+			    "printf trace hwbp %d hit", id);
+		if (zactions_add(a, line) < 0) {
+			printf("trace: message too long\n");
+			return -1;
+		}
+		(void)zactions_add(a, "continue");
+		printf("trace hwbp %d\n", id);
+		return 0;
+	}
+	printf("usage: trace b ADDR [TEXT...] | trace h ID [TEXT...]\n");
+	return -1;
+}
+
+/*
+ * Execute `a`'s action lines through zcmd_exec().  Sets
+ * d->in_action across the run as a recursion guard.  Returns 0
+ * on success, -1 on a failed action, and writes 1 into
+ * *continuep when an explicit `continue`/`cont` action was seen
+ * before any failure.
+ *
+ * `continue` is special: it is consumed here and never reaches
+ * zcmd_exec.  Other lines are dispatched normally; the in_action
+ * guard inside zcmd_exec keeps disallowed nested commands out.
+ */
+static int
+zdbg_run_actions(struct zdbg *d, const struct zaction_list *a,
+    int *continuep)
+{
+	int i;
+	int rc;
+
+	if (continuep != NULL)
+		*continuep = 0;
+	if (d == NULL || a == NULL || a->count == 0)
+		return 0;
+	if (d->in_action) {
+		/* Defensive: should be impossible because zcmd_exec
+		 * rejects nested action triggers, but if reached we
+		 * must not loop. */
+		printf("action rejected: nested action lists are not"
+		    " supported\n");
+		return -1;
+	}
+	d->in_action = 1;
+	for (i = 0; i < a->count; i++) {
+		const char *line = a->lines[i];
+		if (zactions_is_continue(line)) {
+			if (continuep != NULL)
+				*continuep = 1;
+			continue;
+		}
+		if (!zactions_is_allowed(line)) {
+			printf("action rejected: command not allowed in"
+			    " breakpoint action list: %s\n", line);
+			d->in_action = 0;
+			return -1;
+		}
+		rc = zcmd_exec(d, line);
+		if (rc < 0) {
+			printf("action failed: %s\n", line);
+			d->in_action = 0;
+			return -1;
+		}
+	}
+	d->in_action = 0;
+	return 0;
+}
+
 /* --- g / t ----------------------------------------------------- */
 
 /*
@@ -2700,17 +3121,21 @@ cmd_run_and_wait(struct zdbg *d, int step)
 		 */
 		{
 			struct zstop_filter *flt = NULL;
+			struct zaction_list *acts = NULL;
 			int sw_id = d->stopped_bp;
 			int hw_id = d->stopped_hwbp;
 			int is_sw = 0;
 			int is_hw = 0;
+			int cond_failed = 0;
 
 			if (sw_id >= 0 && sw_id < ZDBG_MAX_BREAKPOINTS &&
 			    !d->bps.bp[sw_id].temporary) {
 				flt = &d->bps.bp[sw_id].filter;
+				acts = &d->bps.bp[sw_id].actions;
 				is_sw = 1;
 			} else if (hw_id >= 0 && hw_id < ZDBG_MAX_HWBP) {
 				flt = &d->hwbps.bp[hw_id].filter;
+				acts = &d->hwbps.bp[hw_id].actions;
 				is_hw = 1;
 			}
 			if (flt != NULL) {
@@ -2731,6 +3156,7 @@ cmd_run_and_wait(struct zdbg *d, int step)
 						    " failed: %s\n",
 						    flt->cond);
 						should_stop = 1;
+						cond_failed = 1;
 					} else {
 						should_stop = cres ? 1 : 0;
 					}
@@ -2776,6 +3202,83 @@ cmd_run_and_wait(struct zdbg *d, int step)
 						}
 						continue;
 					}
+				}
+				/*
+				 * Filter let the hit through.  If an
+				 * action list is attached, print the
+				 * normal stop output (unless silent),
+				 * run the actions, and if the actions
+				 * requested `continue`, resume via the
+				 * same dance as a filtered-out hit.
+				 *
+				 * Skip actions when the condition
+				 * failed to evaluate: the user needs
+				 * to see the diagnostic and fix the
+				 * expression first.
+				 */
+				if (acts != NULL && acts->count > 0 &&
+				    !cond_failed) {
+					int cont_after = 0;
+					int arc;
+
+					if (!acts->silent) {
+						zstop_print(d, &st, bp_id);
+						record_last_stop(d, &st);
+					}
+					arc = zdbg_run_actions(d, acts,
+					    &cont_after);
+					if (arc < 0) {
+						/* Action failed: stop for
+						 * the user.  Record the
+						 * stop if silent had
+						 * suppressed it earlier. */
+						if (acts->silent)
+							record_last_stop(d,
+							    &st);
+						return -1;
+					}
+					if (cont_after) {
+						/* Tracepoint-style auto
+						 * resume.  Silent + cont
+						 * deliberately does not
+						 * record last_stop. */
+						if (is_sw) {
+							int rrc;
+							rrc = zdbg_resume_from_bp(
+							    d, 0);
+							if (rrc < 0)
+								return -1;
+							if (rrc == 1)
+								return 0;
+							(void)zhwbp_program(
+							    &d->target,
+							    &d->hwbps);
+							if (ztarget_continue(
+							    &d->target) < 0) {
+								printf("continue"
+								    " failed\n");
+								return -1;
+							}
+						} else if (is_hw) {
+							d->stopped_hwbp = -1;
+							(void)zhwbp_program(
+							    &d->target,
+							    &d->hwbps);
+							if (ztarget_continue(
+							    &d->target) < 0) {
+								printf("continue"
+								    " failed\n");
+								return -1;
+							}
+						}
+						continue;
+					}
+					/* No continue action: stop at the
+					 * prompt.  Record last_stop now
+					 * if silent had skipped it. */
+					if (acts->silent)
+						record_last_stop(d, &st);
+					return 0;
 				}
 			}
 		}
@@ -5162,6 +5665,56 @@ join_args(char *out, size_t cap, char **argv, int start, int end)
 	return 0;
 }
 
+/*
+ * Shared `actions COUNT` / `silent yes|no` assertions for both
+ * software and hardware breakpoint slots.  Returns 0 on match,
+ * a check_fail() result on mismatch, and -2 when `kind` is not
+ * an action-related keyword so the caller can try other forms.
+ */
+static int
+check_actions_state(const char *label, int id,
+    const struct zaction_list *a, const char *kind, const char *arg)
+{
+	uint64_t want;
+
+	if (kind == NULL)
+		return -2;
+	if (strcmp(kind, "actions") == 0) {
+		if (arg == NULL || zexpr_eval(arg, NULL, &want) < 0)
+			return check_fail(
+			    "usage: check %s %d actions COUNT",
+			    label, id);
+		if ((uint64_t)a->count != want)
+			return check_fail(
+			    "%s %d actions expected %llu, got %d",
+			    label, id, (unsigned long long)want, a->count);
+		return 0;
+	}
+	if (strcmp(kind, "silent") == 0) {
+		int want_silent;
+		if (arg == NULL)
+			return check_fail(
+			    "usage: check %s %d silent yes|no",
+			    label, id);
+		if (strcmp(arg, "yes") == 0 || strcmp(arg, "on") == 0)
+			want_silent = 1;
+		else if (strcmp(arg, "no") == 0 || strcmp(arg, "off") == 0)
+			want_silent = 0;
+		else
+			return check_fail(
+			    "usage: check %s %d silent yes|no",
+			    label, id);
+		if ((a->silent ? 1 : 0) != want_silent)
+			return check_fail(
+			    "%s %d silent expected %s, got %s",
+			    label, id,
+			    want_silent ? "yes" : "no",
+			    a->silent ? "yes" : "no");
+		return 0;
+	}
+	return -2;
+}
+
 static int
 check_bp(struct zdbg *d, char **argv, int argc)
 {
@@ -5195,6 +5748,10 @@ check_bp(struct zdbg *d, char **argv, int argc)
 		cond_arg = joined;
 	}
 	rc = check_filter_state("bp", id, &b->filter, argv[2], cond_arg);
+	if (rc != -2)
+		return rc;
+	rc = check_actions_state("bp", id, &b->actions, argv[2],
+	    argc >= 4 ? argv[3] : NULL);
 	if (rc != -2)
 		return rc;
 	return check_bp_state(d, argv[1], argv[2]);
@@ -5258,6 +5815,10 @@ check_hwbp(struct zdbg *d, char **argv, int argc)
 		cond_arg = joined;
 	}
 	rc = check_filter_state("hwbp", id, &b->filter, argv[2], cond_arg);
+	if (rc != -2)
+		return rc;
+	rc = check_actions_state("hwbp", id, &b->actions, argv[2],
+	    argc >= 4 ? argv[3] : NULL);
 	if (rc != -2)
 		return rc;
 	return check_hwbp_state(d, argv[1], argv[2]);
@@ -5578,6 +6139,24 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_ignore(d, &t);
 	if (strcmp(mn, "hits") == 0)
 		return cmd_hits(d, &t);
+	if (strcmp(mn, "actions") == 0 || strcmp(mn, "commands") == 0) {
+		if (d->in_action) {
+			printf("action rejected: command not allowed in"
+			    " breakpoint action list: %s\n", mn);
+			return -1;
+		}
+		return cmd_actions(d, &t);
+	}
+	if (strcmp(mn, "trace") == 0) {
+		if (d->in_action) {
+			printf("action rejected: command not allowed in"
+			    " breakpoint action list: %s\n", mn);
+			return -1;
+		}
+		return cmd_trace(d, &t);
+	}
+	if (strcmp(mn, "printf") == 0)
+		return cmd_printf(d, &t);
 	if (strcmp(mn, "g") == 0)
 		return cmd_g(d, &t);
 	if (strcmp(mn, "t") == 0)

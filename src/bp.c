@@ -58,6 +58,7 @@ zbp_alloc(struct zbp_table *bt, zaddr_t addr, int temporary)
 			bt->bp[i].temporary = temporary ? 1 : 0;
 			bt->bp[i].installed = 0;
 			zfilter_init(&bt->bp[i].filter);
+			zactions_init(&bt->bp[i].actions);
 			return i;
 		}
 	}
@@ -247,6 +248,7 @@ zbp_list(const struct zbp_table *bt)
 		const char *s;
 		const char *ins;
 		char cond[ZDBG_FILTER_EXPR_MAX + 8];
+		char act[32];
 		if (b->state == ZBP_EMPTY)
 			continue;
 		s = (b->state == ZBP_ENABLED) ? "enabled " : "disabled";
@@ -256,11 +258,17 @@ zbp_list(const struct zbp_table *bt)
 			    b->filter.cond);
 		else
 			snprintf(cond, sizeof(cond), "cond=none");
-		printf(" %3d %s %s hits=%llu ignore=%llu %s %016llx%s\n",
+		if (b->actions.silent)
+			snprintf(act, sizeof(act), "actions=%d silent",
+			    b->actions.count);
+		else
+			snprintf(act, sizeof(act), "actions=%d",
+			    b->actions.count);
+		printf(" %3d %s %s hits=%llu ignore=%llu %s %s %016llx%s\n",
 		    i, s, ins,
 		    (unsigned long long)b->filter.hits,
 		    (unsigned long long)b->filter.ignore,
-		    cond,
+		    cond, act,
 		    (unsigned long long)b->addr,
 		    b->temporary ? " (tmp)" : "");
 		any = 1;

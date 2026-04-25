@@ -58,6 +58,7 @@ struct zdbg {
 	int source_depth;	/* current `source` nesting depth. */
 	int verbose;		/* echo script commands before executing. */
 	int quiet;		/* suppress banner and prompts. */
+	int in_action;		/* recursion guard for breakpoint action lists. */
 };
 
 #define ZDBG_MAX_SOURCE_DEPTH 8
