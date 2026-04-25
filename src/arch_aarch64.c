@@ -14,6 +14,7 @@
  * adjustment.
  */
 
+#include <stdio.h>
 #include <stddef.h>
 #include <string.h>
 
@@ -43,6 +44,31 @@ aarch64_fallthrough(const struct zdecode *d)
 }
 
 static int
+aarch64_assemble_one(zaddr_t addr, const char *line,
+    uint8_t *buf, size_t buflen, size_t *lenp,
+    zarch_resolve_fn resolve, void *resolve_arg,
+    char *err, size_t errcap)
+{
+	(void)addr;
+	(void)line;
+	(void)buf;
+	(void)buflen;
+	(void)lenp;
+	(void)resolve;
+	(void)resolve_arg;
+	if (err != NULL && errcap > 0) {
+		const char *m =
+		    "assembly not supported for architecture aarch64";
+		size_t n = strlen(m);
+		if (n >= errcap)
+			n = errcap - 1;
+		memcpy(err, m, n);
+		err[n] = 0;
+	}
+	return -1;
+}
+
+static int
 aarch64_assemble_patch(zaddr_t addr, size_t patch_len, const char *line,
     uint8_t *buf, size_t buflen, size_t *lenp,
     zarch_resolve_fn resolve, void *resolve_arg,
@@ -57,7 +83,8 @@ aarch64_assemble_patch(zaddr_t addr, size_t patch_len, const char *line,
 	(void)resolve;
 	(void)resolve_arg;
 	if (err != NULL && errcap > 0) {
-		const char *m = "AArch64 patch assembly not supported";
+		const char *m =
+		    "patch assembly not supported for architecture aarch64";
 		size_t n = strlen(m);
 		if (n >= errcap)
 			n = errcap - 1;
@@ -99,23 +126,68 @@ aarch64_breakpoint_pc_after_trap(zaddr_t pc)
 	return pc;
 }
 
+static void
+aarch64_regs_print(const struct zregs *regs)
+{
+	(void)regs;
+	printf("registers unsupported for architecture aarch64\n");
+}
+
+static int
+aarch64_regs_get_by_name(const struct zregs *regs, const char *name,
+    uint64_t *vp)
+{
+	(void)regs;
+	(void)name;
+	(void)vp;
+	return -1;
+}
+
+static int
+aarch64_regs_set_by_name(struct zregs *regs, const char *name, uint64_t v)
+{
+	(void)regs;
+	(void)name;
+	(void)v;
+	return -1;
+}
+
+static int
+aarch64_backtrace_fp(struct ztarget *target, const struct zregs *regs,
+    const struct zmap_table *maps, int max_frames,
+    void (*emit)(void *arg, int idx, zaddr_t addr), void *arg)
+{
+	(void)target;
+	(void)regs;
+	(void)maps;
+	(void)max_frames;
+	(void)emit;
+	(void)arg;
+	return -1;
+}
+
 static const struct zarch_ops aarch64_ops = {
-	ZARCH_AARCH64,
-	"aarch64",
-	aarch64_brk,
-	sizeof(aarch64_brk),
-	aarch64_decode_one,
-	aarch64_fallthrough,
-	aarch64_assemble_patch,
-	aarch64_invert_jcc,
-	aarch64_unsupported_get,
-	aarch64_unsupported_set,
-	aarch64_unsupported_get,
-	aarch64_unsupported_get,
-	"pc",
-	"sp",
-	"x29",
-	aarch64_breakpoint_pc_after_trap
+	.arch = ZARCH_AARCH64,
+	.name = "aarch64",
+	.breakpoint_bytes = aarch64_brk,
+	.breakpoint_len = sizeof(aarch64_brk),
+	.decode_one = aarch64_decode_one,
+	.fallthrough = aarch64_fallthrough,
+	.assemble_one = aarch64_assemble_one,
+	.assemble_patch = aarch64_assemble_patch,
+	.invert_jcc = aarch64_invert_jcc,
+	.get_pc = aarch64_unsupported_get,
+	.set_pc = aarch64_unsupported_set,
+	.get_sp = aarch64_unsupported_get,
+	.get_fp = aarch64_unsupported_get,
+	.pc_reg_name = "pc",
+	.sp_reg_name = "sp",
+	.fp_reg_name = "x29",
+	.breakpoint_pc_after_trap = aarch64_breakpoint_pc_after_trap,
+	.regs_print = aarch64_regs_print,
+	.regs_get_by_name = aarch64_regs_get_by_name,
+	.regs_set_by_name = aarch64_regs_set_by_name,
+	.backtrace_fp = aarch64_backtrace_fp
 };
 
 const struct zarch_ops *
