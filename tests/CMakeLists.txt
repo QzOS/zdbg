@@ -58,6 +58,10 @@ add_executable(test_cmd_script test_cmd_script.c)
 target_link_libraries(test_cmd_script PRIVATE zdbg_core)
 add_test(NAME test_cmd_script COMMAND test_cmd_script)
 
+add_executable(test_check test_check.c)
+target_link_libraries(test_check PRIVATE zdbg_core)
+add_test(NAME test_check COMMAND test_check)
+
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     add_executable(test_linux_target test_linux_target.c)
     target_link_libraries(test_linux_target PRIVATE zdbg_core)

@@ -39,6 +39,17 @@ struct zdbg {
 	char **target_argv;
 	int stopped_bp;		/* id of breakpoint currently stopped on, -1 otherwise */
 	int stopped_hwbp;	/* id of hw breakpoint currently stopped on, -1 otherwise */
+	/*
+	 * Most recent user-visible stop, used by script-friendly
+	 * `check` assertions.  `have_last_stop` is 0 until at least
+	 * one stop has been observed (initial trap, breakpoint,
+	 * single-step, signal, exception, or exit).  Cleared when
+	 * the target is detached/killed.
+	 */
+	struct zstop last_stop;
+	int have_last_stop;
+	int last_stop_hwbp;	/* hwbp slot id for the recorded stop, -1 otherwise */
+	int last_stop_is_watch;	/* nonzero when last hw stop is a data watchpoint */
 	/* Script / batch / REPL execution state. */
 	int quit_requested;	/* set by `q`/`quit` to ask the REPL or */
 				/* script driver to stop reading commands. */

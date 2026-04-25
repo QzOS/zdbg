@@ -8,6 +8,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
 #include <limits.h>
@@ -163,7 +164,9 @@ print_help(void)
 	    "  handle [sig [opts]]  show/set signal/exception stop/pass/"
 	    "print policy\n"
 	    "  source path          execute commands from script file\n"
-	    "  . path                alias for source\n");
+	    "  . path                alias for source\n"
+	    "  check ...            script-friendly assertion (see README)\n"
+	    "  assert ...           alias for check\n");
 }
 
 static int
@@ -908,6 +911,100 @@ s_parse_uint(const char *s, uint64_t *out)
 	return zexpr_eval(s, NULL, out);
 }
 
+/*
+ * Parse one pattern selector starting at argv[*idxp].
+ *
+ * Recognized forms:
+ *   -str "text"   ASCII bytes (with the same escape set as cmd_s)
+ *   -wstr "text"  UTF-16LE bytes
+ *   -u32  expr    4-byte little-endian, expr resolved with eval_addr
+ *   -u64  expr    8-byte little-endian, expr resolved with eval_addr
+ *   -ptr  expr    pointer-sized little-endian (currently 8 bytes)
+ *
+ * Returns:
+ *    1  selector recognized and consumed; *idxp advanced past the
+ *       value argument; *lenp set
+ *    0  argv[*idxp] is not a recognized selector; nothing consumed
+ *   -1  selector recognized but its argument was missing or
+ *       invalid; an error message has already been printed
+ *
+ * Shared by cmd_s and cmd_check so the two stay in sync.
+ */
+static int
+parse_pattern_selector(struct zdbg *d, char **argv, int argc, int *idxp,
+    uint8_t *pat, size_t cap, size_t *lenp)
+{
+	const char *opt;
+	int i;
+
+	if (argv == NULL || idxp == NULL || pat == NULL || lenp == NULL)
+		return -1;
+	i = *idxp;
+	if (i >= argc)
+		return 0;
+	opt = argv[i];
+	if (opt == NULL || opt[0] != '-')
+		return 0;
+
+	if (strcmp(opt, "-str") == 0) {
+		if (i + 1 >= argc) {
+			printf("usage: -str \"text\"\n");
+			return -1;
+		}
+		if (zmem_make_ascii_pattern(argv[i + 1], pat, cap, lenp) < 0
+		    || *lenp == 0) {
+			printf("bad string\n");
+			return -1;
+		}
+		*idxp = i + 1;
+		return 1;
+	}
+	if (strcmp(opt, "-wstr") == 0) {
+		if (i + 1 >= argc) {
+			printf("usage: -wstr \"text\"\n");
+			return -1;
+		}
+		if (zmem_make_utf16le_pattern(argv[i + 1], pat, cap, lenp) < 0
+		    || *lenp == 0) {
+			printf("bad wstring\n");
+			return -1;
+		}
+		*idxp = i + 1;
+		return 1;
+	}
+	if (strcmp(opt, "-u32") == 0) {
+		zaddr_t v;
+		if (i + 1 >= argc || eval_addr(d, argv[i + 1], &v) < 0) {
+			printf("bad -u32 value\n");
+			return -1;
+		}
+		zmem_make_u32_pattern((uint32_t)v, pat, cap, lenp);
+		*idxp = i + 1;
+		return 1;
+	}
+	if (strcmp(opt, "-u64") == 0) {
+		zaddr_t v;
+		if (i + 1 >= argc || eval_addr(d, argv[i + 1], &v) < 0) {
+			printf("bad -u64 value\n");
+			return -1;
+		}
+		zmem_make_u64_pattern((uint64_t)v, pat, cap, lenp);
+		*idxp = i + 1;
+		return 1;
+	}
+	if (strcmp(opt, "-ptr") == 0) {
+		zaddr_t v;
+		if (i + 1 >= argc || eval_addr(d, argv[i + 1], &v) < 0) {
+			printf("bad -ptr expression\n");
+			return -1;
+		}
+		zmem_make_u64_pattern((uint64_t)v, pat, cap, lenp);
+		*idxp = i + 1;
+		return 1;
+	}
+	return 0;
+}
+
 /* --- s --------------------------------------------------------- */
 
 static int
@@ -970,60 +1067,19 @@ cmd_s(struct zdbg *d, struct toks *t)
 			}
 			limit = (int)v;
 			i++;
-		} else if (strcmp(opt, "-str") == 0) {
-			if (i + 1 >= a.n) {
-				printf("usage: s -str \"text\"\n");
+		} else if (strcmp(opt, "-str") == 0 ||
+		    strcmp(opt, "-wstr") == 0 ||
+		    strcmp(opt, "-u32") == 0 ||
+		    strcmp(opt, "-u64") == 0 ||
+		    strcmp(opt, "-ptr") == 0) {
+			int rc = parse_pattern_selector(d, a.v, a.n, &i,
+			    pat, sizeof(pat), &patlen);
+			if (rc < 0)
+				return -1;
+			if (rc == 0) {
+				printf("unknown option: %s\n", opt);
 				return -1;
 			}
-			if (zmem_make_ascii_pattern(a.v[++i], pat,
-			    sizeof(pat), &patlen) < 0 || patlen == 0) {
-				printf("bad string\n");
-				return -1;
-			}
-			have_pat = 1;
-		} else if (strcmp(opt, "-wstr") == 0) {
-			if (i + 1 >= a.n) {
-				printf("usage: s -wstr \"text\"\n");
-				return -1;
-			}
-			if (zmem_make_utf16le_pattern(a.v[++i], pat,
-			    sizeof(pat), &patlen) < 0 || patlen == 0) {
-				printf("bad wstring\n");
-				return -1;
-			}
-			have_pat = 1;
-		} else if (strcmp(opt, "-u32") == 0) {
-			zaddr_t v;
-			if (i + 1 >= a.n || eval_addr(d, a.v[i + 1], &v) < 0) {
-				printf("bad -u32 value\n");
-				return -1;
-			}
-			zmem_make_u32_pattern((uint32_t)v, pat, sizeof(pat),
-			    &patlen);
-			have_pat = 1;
-			i++;
-		} else if (strcmp(opt, "-u64") == 0) {
-			zaddr_t v;
-			if (i + 1 >= a.n || eval_addr(d, a.v[i + 1], &v) < 0) {
-				printf("bad -u64 value\n");
-				return -1;
-			}
-			zmem_make_u64_pattern((uint64_t)v, pat, sizeof(pat),
-			    &patlen);
-			have_pat = 1;
-			i++;
-		} else if (strcmp(opt, "-ptr") == 0) {
-			zaddr_t v;
-			if (i + 1 >= a.n) {
-				printf("usage: s -ptr expr\n");
-				return -1;
-			}
-			if (eval_addr(d, a.v[++i], &v) < 0) {
-				printf("bad -ptr expression\n");
-				return -1;
-			}
-			zmem_make_u64_pattern((uint64_t)v, pat, sizeof(pat),
-			    &patlen);
 			have_pat = 1;
 		} else if (opt[0] == '-' && opt[1] != 0) {
 			printf("unknown option: %s\n", opt);
@@ -2190,6 +2246,30 @@ cmd_he(struct zdbg *d, struct toks *t)
 /* --- g / t ----------------------------------------------------- */
 
 /*
+ * Record the latest user-visible stop on d so the script-facing
+ * `check stop`/`check exited`/`check rip` family can inspect it.
+ * Called after a stop has been classified (breakpoint vs hwbp)
+ * but before the auto-continue path filters non-stopping
+ * signals/exceptions out, since auto-continued events do not
+ * end up in front of the user.
+ */
+static void
+record_last_stop(struct zdbg *d, const struct zstop *st)
+{
+	if (d == NULL || st == NULL)
+		return;
+	d->last_stop = *st;
+	d->have_last_stop = 1;
+	d->last_stop_hwbp = d->stopped_hwbp;
+	d->last_stop_is_watch = 0;
+	if (d->stopped_hwbp >= 0 && d->stopped_hwbp < ZDBG_MAX_HWBP) {
+		const struct zhwbp *b = &d->hwbps.bp[d->stopped_hwbp];
+		if (b->kind == ZHWBP_WRITE || b->kind == ZHWBP_READWRITE)
+			d->last_stop_is_watch = 1;
+	}
+}
+
+/*
  * Post-wait processing shared by g and t.  Refresh registers,
  * recognize x86-64 int3 breakpoint hits belonging to zdbg, and
  * apply the RIP-1 correction before the user sees the stop.
@@ -2445,6 +2525,7 @@ cmd_run_and_wait(struct zdbg *d, int step)
 			}
 			if (do_print)
 				zstop_print(d, &st, bp_id);
+			record_last_stop(d, &st);
 			return 0;
 		}
 
@@ -2487,10 +2568,12 @@ cmd_run_and_wait(struct zdbg *d, int step)
 					    "delivered on continue\n",
 					    zsig_name(sig));
 			}
+			record_last_stop(d, &st);
 			return 0;
 		}
 
 		zstop_print(d, &st, bp_id);
+		record_last_stop(d, &st);
 		return 0;
 	}
 }
@@ -3136,6 +3219,7 @@ report_initial_stop(struct zdbg *d)
 		st.addr = d->regs.rip;
 	}
 	zstop_print(d, &st, -1);
+	record_last_stop(d, &st);
 }
 
 static int
@@ -3235,6 +3319,9 @@ cmd_ld(struct zdbg *d, struct toks *t)
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
 	d->stopped_hwbp = -1;
+	d->have_last_stop = 0;
+	d->last_stop_hwbp = -1;
+	d->last_stop_is_watch = 0;
 	zhwbp_table_init(&d->hwbps);
 	clear_maps(d);
 	clear_syms(d);
@@ -3257,6 +3344,9 @@ cmd_k(struct zdbg *d, struct toks *t)
 	ztarget_init(&d->target);
 	d->stopped_bp = -1;
 	d->stopped_hwbp = -1;
+	d->have_last_stop = 0;
+	d->last_stop_hwbp = -1;
+	d->last_stop_is_watch = 0;
 	zhwbp_table_init(&d->hwbps);
 	clear_maps(d);
 	clear_syms(d);
@@ -4220,6 +4310,647 @@ cmd_source(struct zdbg *d, struct toks *t)
 	return zcmd_source_file(d, a.v[0]) == 0 ? 0 : -1;
 }
 
+/* --- check / assert / expect ---------------------------------- */
+
+/*
+ * Script-friendly assertion command family.  Every check returns
+ * 0 on pass and -1 on failure.  Successful checks are silent;
+ * failed ones print a single line beginning with "check failed:"
+ * (or "assert failed:" / "expect failed:" when invoked under the
+ * alias).  The script driver naturally stops on the first failure
+ * because zcmd_source_file() already aborts on a nonzero command
+ * return value.
+ *
+ * Subcommands intentionally do not introduce a scripting language:
+ * arguments are resolved with the same tiny expression evaluator
+ * used elsewhere (eval_addr / zexpr_eval).
+ */
+
+static const char *check_word = "check";
+
+/*
+ * Map a stop-reason name to enum zstop_reason.
+ *
+ *   initial breakpoint singlestep signal exception exit error
+ *   hwbp watchpoint               (mapped to existing reasons)
+ *
+ * Returns 0 on success and writes *out, -1 on unknown name.
+ * Sets *want_hwbp to 1 for "hwbp" and *want_watch to 1 for
+ * "watchpoint", since both arrive over BREAKPOINT/SINGLESTEP
+ * but are distinguished via d->last_stop_hwbp/last_stop_is_watch.
+ */
+static int
+check_parse_stop_reason(const char *s, enum zstop_reason *out,
+    int *want_hwbp, int *want_watch)
+{
+	if (s == NULL || out == NULL)
+		return -1;
+	*want_hwbp = 0;
+	*want_watch = 0;
+	if (strcmp(s, "initial") == 0) {
+		*out = ZSTOP_INITIAL;
+		return 0;
+	}
+	if (strcmp(s, "breakpoint") == 0 || strcmp(s, "bp") == 0) {
+		*out = ZSTOP_BREAKPOINT;
+		return 0;
+	}
+	if (strcmp(s, "singlestep") == 0 || strcmp(s, "step") == 0) {
+		*out = ZSTOP_SINGLESTEP;
+		return 0;
+	}
+	if (strcmp(s, "signal") == 0) {
+		*out = ZSTOP_SIGNAL;
+		return 0;
+	}
+	if (strcmp(s, "exception") == 0) {
+		*out = ZSTOP_EXCEPTION;
+		return 0;
+	}
+	if (strcmp(s, "exit") == 0) {
+		*out = ZSTOP_EXIT;
+		return 0;
+	}
+	if (strcmp(s, "error") == 0) {
+		*out = ZSTOP_ERROR;
+		return 0;
+	}
+	if (strcmp(s, "hwbp") == 0 || strcmp(s, "hwbreak") == 0) {
+		*out = ZSTOP_BREAKPOINT;
+		*want_hwbp = 1;
+		return 0;
+	}
+	if (strcmp(s, "watchpoint") == 0 || strcmp(s, "watch") == 0) {
+		*out = ZSTOP_BREAKPOINT;
+		*want_hwbp = 1;
+		*want_watch = 1;
+		return 0;
+	}
+	return -1;
+}
+
+/*
+ * Test whether `tok` is a pure numeric token that the symbol
+ * lookup commands should refuse to treat as a symbol name.  This
+ * matches the input forms accepted by zexpr_eval as numbers:
+ * default-hex digits, "0x" prefix, "h" suffix, "#" decimal.
+ *
+ * Returns 1 on numeric, 0 on a real (or empty) name.
+ */
+static int
+check_token_is_numeric(const char *s)
+{
+	uint64_t v;
+
+	if (s == NULL || *s == 0)
+		return 0;
+	return zexpr_eval(s, NULL, &v) == 0 ? 1 : 0;
+}
+
+/*
+ * Look up a symbol expression `name` (optionally module:name)
+ * without falling back to numeric/map/register paths.  Pure
+ * numeric tokens are rejected so `check symbol 401000` fails.
+ *
+ * Returns 0 on found and writes *out, -1 on not-found, -2 on
+ * ambiguous, -3 on numeric input.
+ */
+static int
+check_resolve_symbol_strict(struct zdbg *d, const char *name, zaddr_t *out)
+{
+	if (name == NULL || *name == 0)
+		return -1;
+	if (check_token_is_numeric(name))
+		return -3;
+	if (!d->have_syms)
+		return -1;
+	return zsyms_resolve(&d->syms, d->have_maps ? &d->maps : NULL,
+	    name, out);
+}
+
+static int
+check_fail(const char *fmt, ...)
+{
+	va_list ap;
+
+	printf("%s failed: ", check_word);
+	va_start(ap, fmt);
+	vprintf(fmt, ap);
+	va_end(ap);
+	printf("\n");
+	return -1;
+}
+
+static int
+check_target(struct zdbg *d)
+{
+	if (have_target(d))
+		return 0;
+	return check_fail("no target");
+}
+
+static int
+check_stopped(struct zdbg *d)
+{
+	if (!have_target(d))
+		return check_fail("no target");
+	if (!target_stopped(d))
+		return check_fail("target not stopped");
+	return 0;
+}
+
+static int
+check_running(struct zdbg *d)
+{
+	if (!have_target(d))
+		return check_fail("no target");
+	if (d->target.state != ZTARGET_RUNNING)
+		return check_fail("target not running");
+	return 0;
+}
+
+static int
+check_exited(struct zdbg *d, int has_code, int code)
+{
+	int got;
+
+	if (!d->have_last_stop ||
+	    d->last_stop.reason != ZSTOP_EXIT) {
+		if (d->target.state != ZTARGET_EXITED)
+			return check_fail("target has not exited");
+	}
+	if (!has_code)
+		return 0;
+	got = d->have_last_stop ? d->last_stop.code : 0;
+	if (got != code)
+		return check_fail(
+		    "expected exit code %d, got %d", code, got);
+	return 0;
+}
+
+static int
+check_stop(struct zdbg *d, const char *reason_name)
+{
+	enum zstop_reason want;
+	int want_hwbp = 0;
+	int want_watch = 0;
+
+	if (!d->have_last_stop)
+		return check_fail("no last stop");
+	if (check_parse_stop_reason(reason_name, &want, &want_hwbp,
+	    &want_watch) < 0)
+		return check_fail("unknown stop reason: %s",
+		    reason_name);
+	if (d->last_stop.reason != want) {
+		/* Allow ZSTOP_SINGLESTEP for hwbp/watch on Windows
+		 * where hardware traps surface as single-step. */
+		if (want_hwbp && d->last_stop.reason == ZSTOP_SINGLESTEP)
+			/* fall through to hwbp/watch validation */;
+		else
+			return check_fail("stop reason mismatch");
+	}
+	if (want_hwbp && d->last_stop_hwbp < 0)
+		return check_fail("last stop is not a hardware stop");
+	if (want_watch && !d->last_stop_is_watch)
+		return check_fail("last stop is not a watchpoint");
+	return 0;
+}
+
+static int
+check_thread(struct zdbg *d, const char *tok)
+{
+	uint64_t cur;
+
+	if (!have_target(d))
+		return check_fail("no target");
+	cur = ztarget_current_thread(&d->target);
+	if (tok == NULL || strcmp(tok, "current") == 0) {
+		if (cur == 0)
+			return check_fail("no current thread");
+		return 0;
+	}
+	{
+		uint64_t want;
+		if (zexpr_eval(tok, NULL, &want) < 0)
+			return check_fail("bad tid: %s", tok);
+		if (cur != want)
+			return check_fail(
+			    "thread expected %llu, got %llu",
+			    (unsigned long long)want,
+			    (unsigned long long)cur);
+	}
+	return 0;
+}
+
+static int
+check_reg(struct zdbg *d, const char *name, const char *expr)
+{
+	uint64_t got = 0;
+	zaddr_t want = 0;
+
+	if (!have_target(d))
+		return check_fail("no target");
+	if (!target_stopped(d))
+		return check_fail("target not stopped");
+	refresh_regs(d);
+	if (zregs_get_by_name(&d->regs, name, &got) < 0)
+		return check_fail("unknown register: %s", name);
+	if (eval_addr(d, expr, &want) < 0) {
+		uint64_t v;
+		if (zexpr_eval(expr, &d->regs, &v) < 0)
+			return check_fail("bad value: %s", expr);
+		want = (zaddr_t)v;
+	}
+	if ((uint64_t)want != got) {
+		char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+		char gnn[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+		annot_addr(d, (zaddr_t)want, ann, sizeof(ann));
+		annot_addr(d, (zaddr_t)got, gnn, sizeof(gnn));
+		return check_fail(
+		    "%s expected %016llx%s, got %016llx%s",
+		    name, (unsigned long long)want, ann,
+		    (unsigned long long)got, gnn);
+	}
+	return 0;
+}
+
+static int
+check_mem(struct zdbg *d, char **argv, int argc)
+{
+	uint8_t pat[ZDBG_SEARCH_MAX_PATTERN];
+	uint8_t got[ZDBG_SEARCH_MAX_PATTERN];
+	size_t patlen = 0;
+	zaddr_t addr;
+	int i = 1; /* argv[0] is "mem" */
+	int rc;
+	size_t k;
+
+	if (!have_target(d))
+		return check_fail("no target");
+	if (!target_stopped(d))
+		return check_fail("target not stopped");
+	if (i >= argc)
+		return check_fail("usage: check mem ADDR PATTERN");
+	if (eval_addr(d, argv[i], &addr) < 0)
+		return check_fail("bad address: %s", argv[i]);
+	i++;
+	if (i >= argc)
+		return check_fail("usage: check mem ADDR PATTERN");
+
+	rc = parse_pattern_selector(d, argv, argc, &i, pat, sizeof(pat),
+	    &patlen);
+	if (rc < 0)
+		return -1;
+	if (rc == 0) {
+		/* Raw byte tokens: join remaining argv into a buffer
+		 * and let zmem_parse_bytes handle the same syntax as
+		 * `s addr len bytes...`. */
+		char tmp[ZDBG_SEARCH_MAX_PATTERN * 4];
+		size_t tlen = 0;
+		int j;
+		tmp[0] = 0;
+		for (j = i; j < argc; j++) {
+			size_t need = strlen(argv[j]) + 2;
+			if (tlen + need >= sizeof(tmp))
+				return check_fail("pattern too long");
+			if (tlen)
+				tmp[tlen++] = ' ';
+			memcpy(tmp + tlen, argv[j], strlen(argv[j]));
+			tlen += strlen(argv[j]);
+			tmp[tlen] = 0;
+		}
+		if (zmem_parse_bytes(tmp, pat, sizeof(pat), &patlen) < 0
+		    || patlen == 0)
+			return check_fail("bad bytes");
+	}
+
+	if (patlen > sizeof(got))
+		return check_fail("pattern too long");
+	if (ztarget_read(&d->target, addr, got, patlen) < 0)
+		return check_fail(
+		    "cannot read memory at %016llx",
+		    (unsigned long long)addr);
+	for (k = 0; k < patlen; k++) {
+		if (got[k] != pat[k])
+			return check_fail(
+			    "memory %016llx differs at +0x%x: "
+			    "expected %02x got %02x",
+			    (unsigned long long)addr, (unsigned int)k,
+			    (unsigned int)pat[k],
+			    (unsigned int)got[k]);
+	}
+	return 0;
+}
+
+static int
+check_symbol(struct zdbg *d, const char *name)
+{
+	zaddr_t out;
+	int rc;
+
+	if (name == NULL || *name == 0)
+		return check_fail("usage: check symbol NAME");
+	rc = check_resolve_symbol_strict(d, name, &out);
+	if (rc == 0)
+		return 0;
+	if (rc == -3)
+		return check_fail("symbol name is numeric: %s", name);
+	if (rc == -2)
+		return check_fail("symbol ambiguous: %s", name);
+	return check_fail("symbol not found: %s", name);
+}
+
+static int
+check_nosymbol(struct zdbg *d, const char *name)
+{
+	zaddr_t out;
+	int rc;
+
+	if (name == NULL || *name == 0)
+		return check_fail("usage: check nosymbol NAME");
+	if (check_token_is_numeric(name))
+		return check_fail("symbol name is numeric: %s", name);
+	rc = check_resolve_symbol_strict(d, name, &out);
+	if (rc == 0)
+		return check_fail("symbol resolved unexpectedly: %s", name);
+	return 0;
+}
+
+static int
+check_map(struct zdbg *d, const char *expr)
+{
+	zaddr_t addr;
+	const struct zmap *m = NULL;
+
+	if (expr == NULL || *expr == 0)
+		return check_fail("usage: check map EXPR");
+	if (eval_addr(d, expr, &addr) < 0)
+		return check_fail("bad expression: %s", expr);
+	if (d->have_regions)
+		m = zmaps_find_by_addr(&d->regions, addr);
+	if (m == NULL && d->have_maps)
+		m = zmaps_find_by_addr(&d->maps, addr);
+	if (m == NULL)
+		return check_fail(
+		    "address %016llx is not in any known map/region",
+		    (unsigned long long)addr);
+	return 0;
+}
+
+static int
+check_patch_state(struct zdbg *d, const char *idtok, const char *state)
+{
+	uint64_t v;
+	const struct zpatch *p = NULL;
+
+	if (zexpr_eval(idtok, NULL, &v) < 0)
+		return check_fail("bad patch id: %s", idtok);
+	if (zpatch_get(&d->patches, (int)v, &p) < 0 || p == NULL)
+		return check_fail("no patch %d", (int)v);
+	if (strcmp(state, "applied") == 0) {
+		if (p->state != ZPATCH_APPLIED)
+			return check_fail("patch %d not applied",
+			    (int)v);
+		return 0;
+	}
+	if (strcmp(state, "reverted") == 0) {
+		if (p->state != ZPATCH_REVERTED)
+			return check_fail("patch %d not reverted",
+			    (int)v);
+		return 0;
+	}
+	return check_fail("unknown patch state: %s", state);
+}
+
+static int
+check_bp_state(struct zdbg *d, const char *idtok, const char *state)
+{
+	uint64_t v;
+	int id;
+	struct zbp *b;
+
+	if (zexpr_eval(idtok, NULL, &v) < 0)
+		return check_fail("bad bp id: %s", idtok);
+	id = (int)v;
+	if (id < 0 || id >= ZDBG_MAX_BREAKPOINTS)
+		return check_fail("bp id out of range: %d", id);
+	b = &d->bps.bp[id];
+	if (b->state == ZBP_EMPTY)
+		return check_fail("no breakpoint %d", id);
+	if (strcmp(state, "enabled") == 0) {
+		if (b->state != ZBP_ENABLED)
+			return check_fail("bp %d not enabled", id);
+		return 0;
+	}
+	if (strcmp(state, "disabled") == 0) {
+		if (b->state != ZBP_DISABLED)
+			return check_fail("bp %d not disabled", id);
+		return 0;
+	}
+	if (strcmp(state, "installed") == 0) {
+		if (!b->installed)
+			return check_fail("bp %d not installed", id);
+		return 0;
+	}
+	if (strcmp(state, "removed") == 0) {
+		if (b->installed)
+			return check_fail("bp %d still installed", id);
+		return 0;
+	}
+	return check_fail("unknown bp state: %s", state);
+}
+
+static int
+check_hwbp_state(struct zdbg *d, const char *idtok, const char *state)
+{
+	uint64_t v;
+	int id;
+	struct zhwbp *b;
+
+	if (zexpr_eval(idtok, NULL, &v) < 0)
+		return check_fail("bad hwbp id: %s", idtok);
+	id = (int)v;
+	if (id < 0 || id >= ZDBG_MAX_HWBP)
+		return check_fail("hwbp id out of range: %d", id);
+	b = &d->hwbps.bp[id];
+	if (b->state == ZHWBP_EMPTY)
+		return check_fail("no hwbp %d", id);
+	if (strcmp(state, "enabled") == 0) {
+		if (b->state != ZHWBP_ENABLED)
+			return check_fail("hwbp %d not enabled", id);
+		return 0;
+	}
+	if (strcmp(state, "disabled") == 0) {
+		if (b->state != ZHWBP_DISABLED)
+			return check_fail("hwbp %d not disabled", id);
+		return 0;
+	}
+	return check_fail("unknown hwbp state: %s", state);
+}
+
+/*
+ * `check file PATH exists` returns 0 if PATH can be opened.
+ * `check file PATH size LEN` additionally requires the file to
+ * be exactly LEN bytes long.  fopen/fseek/ftell are sufficient
+ * for the small artefacts these checks are aimed at; anything
+ * larger than `long` reports a clean failure.
+ */
+static int
+check_file(const char *path, const char *kind, const char *arg)
+{
+	FILE *fp;
+
+	if (path == NULL || *path == 0 || kind == NULL)
+		return check_fail("usage: check file PATH exists|size LEN");
+
+	if (strcmp(kind, "exists") == 0) {
+		fp = fopen(path, "rb");
+		if (fp == NULL)
+			return check_fail("file does not exist: %s", path);
+		fclose(fp);
+		return 0;
+	}
+	if (strcmp(kind, "size") == 0) {
+		uint64_t want;
+		long sz;
+		if (arg == NULL ||
+		    zexpr_eval(arg, NULL, &want) < 0)
+			return check_fail(
+			    "usage: check file PATH size LEN");
+		fp = fopen(path, "rb");
+		if (fp == NULL)
+			return check_fail("file does not exist: %s", path);
+		if (fseek(fp, 0, SEEK_END) != 0) {
+			fclose(fp);
+			return check_fail("cannot seek: %s", path);
+		}
+		sz = ftell(fp);
+		fclose(fp);
+		if (sz < 0)
+			return check_fail("cannot size: %s", path);
+		if ((uint64_t)sz != want)
+			return check_fail(
+			    "file %s size expected %llu, got %llu",
+			    path, (unsigned long long)want,
+			    (unsigned long long)sz);
+		return 0;
+	}
+	return check_fail("unknown file check: %s", kind);
+}
+
+static int
+cmd_check(struct zdbg *d, struct toks *t)
+{
+	struct cmd_qargs a;
+	const char *line;
+	const char *sub;
+	int argc;
+	char **argv;
+
+	(void)t;
+	/* Re-parse from the original line so quoted arguments
+	 * (paths, strings) survive intact.  rest_from(t->orig, 1)
+	 * starts after the command word. */
+	line = rest_from(t->orig, 1);
+	while (*line == ' ' || *line == '\t')
+		line++;
+	if (cmd_qsplit(line, &a) < 0)
+		return check_fail("argument list too long");
+	if (a.n < 1)
+		return check_fail(
+		    "usage: %s SUBCOMMAND ... (try `?`)", check_word);
+	argc = a.n;
+	argv = a.v;
+	sub = argv[0];
+
+	if (strcmp(sub, "target") == 0)
+		return check_target(d);
+	if (strcmp(sub, "stopped") == 0)
+		return check_stopped(d);
+	if (strcmp(sub, "running") == 0)
+		return check_running(d);
+	if (strcmp(sub, "exited") == 0) {
+		if (argc == 1)
+			return check_exited(d, 0, 0);
+		{
+			uint64_t v;
+			if (zexpr_eval(argv[1], NULL, &v) < 0)
+				return check_fail("bad code: %s", argv[1]);
+			return check_exited(d, 1, (int)v);
+		}
+	}
+	if (strcmp(sub, "stop") == 0) {
+		if (argc < 2)
+			return check_fail("usage: %s stop REASON",
+			    check_word);
+		return check_stop(d, argv[1]);
+	}
+	if (strcmp(sub, "thread") == 0)
+		return check_thread(d, argc >= 2 ? argv[1] : NULL);
+	if (strcmp(sub, "reg") == 0) {
+		if (argc < 3)
+			return check_fail(
+			    "usage: %s reg NAME VALUE", check_word);
+		return check_reg(d, argv[1], argv[2]);
+	}
+	if (strcmp(sub, "rip") == 0) {
+		if (argc < 2)
+			return check_fail("usage: %s rip EXPR",
+			    check_word);
+		return check_reg(d, "rip", argv[1]);
+	}
+	if (strcmp(sub, "mem") == 0)
+		return check_mem(d, argv, argc);
+	if (strcmp(sub, "symbol") == 0 || strcmp(sub, "sym") == 0) {
+		if (argc < 2)
+			return check_fail("usage: %s symbol NAME",
+			    check_word);
+		return check_symbol(d, argv[1]);
+	}
+	if (strcmp(sub, "nosymbol") == 0 || strcmp(sub, "nosym") == 0) {
+		if (argc < 2)
+			return check_fail("usage: %s nosymbol NAME",
+			    check_word);
+		return check_nosymbol(d, argv[1]);
+	}
+	if (strcmp(sub, "map") == 0) {
+		if (argc < 2)
+			return check_fail("usage: %s map EXPR",
+			    check_word);
+		return check_map(d, argv[1]);
+	}
+	if (strcmp(sub, "patch") == 0) {
+		if (argc < 3)
+			return check_fail(
+			    "usage: %s patch ID applied|reverted",
+			    check_word);
+		return check_patch_state(d, argv[1], argv[2]);
+	}
+	if (strcmp(sub, "bp") == 0) {
+		if (argc < 3)
+			return check_fail(
+			    "usage: %s bp ID enabled|disabled|"
+			    "installed|removed", check_word);
+		return check_bp_state(d, argv[1], argv[2]);
+	}
+	if (strcmp(sub, "hwbp") == 0) {
+		if (argc < 3)
+			return check_fail(
+			    "usage: %s hwbp ID enabled|disabled",
+			    check_word);
+		return check_hwbp_state(d, argv[1], argv[2]);
+	}
+	if (strcmp(sub, "file") == 0) {
+		if (argc < 3)
+			return check_fail(
+			    "usage: %s file PATH exists|size LEN",
+			    check_word);
+		return check_file(argv[1], argv[2],
+		    argc >= 4 ? argv[3] : NULL);
+	}
+	return check_fail("unknown subcommand: %s", sub);
+}
+
 /* --- top-level dispatch --------------------------------------- */
 
 void
@@ -4246,6 +4977,9 @@ zdbg_init(struct zdbg *d)
 	d->have_syms = 0;
 	d->stopped_bp = -1;
 	d->stopped_hwbp = -1;
+	d->have_last_stop = 0;
+	d->last_stop_hwbp = -1;
+	d->last_stop_is_watch = 0;
 	d->quit_requested = 0;
 	d->had_error = 0;
 	d->last_status = 0;
@@ -4392,6 +5126,24 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_ex(d, &t);
 	if (strcmp(mn, "handle") == 0)
 		return cmd_handle(d, &t);
+	if (strcmp(mn, "check") == 0) {
+		check_word = "check";
+		return cmd_check(d, &t);
+	}
+	if (strcmp(mn, "assert") == 0) {
+		int rc;
+		check_word = "assert";
+		rc = cmd_check(d, &t);
+		check_word = "check";
+		return rc;
+	}
+	if (strcmp(mn, "expect") == 0) {
+		int rc;
+		check_word = "expect";
+		rc = cmd_check(d, &t);
+		check_word = "check";
+		return rc;
+	}
 
 	printf("unknown command: %s (try ?)\n", mn);
 	return -1;

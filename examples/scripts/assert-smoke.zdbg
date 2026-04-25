@@ -1,0 +1,19 @@
+; assert-smoke.zdbg - smoke test for the `check` assertion family.
+;
+; Usage:
+;   zdbg --batch -q -x examples/scripts/assert-smoke.zdbg \
+;       ./build/examples/testprog
+;
+; Exit status is 0 if every check passes, 1 if any check fails.
+
+l
+check target
+check stopped
+check stop initial
+check map rip
+check symbol main
+b main
+g
+check stop breakpoint
+check rip main
+q
