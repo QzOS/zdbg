@@ -298,6 +298,45 @@ test_roundtrip(void)
 	CHECK(strstr(d.text, "jnz8") != NULL);
 }
 
+static void
+test_indirect_r11(void)
+{
+	struct ztinydis d;
+	uint8_t buf[16];
+
+	/* jmp r11: 41 FF E3 */
+	buf[0] = 0x41; buf[1] = 0xff; buf[2] = 0xe3;
+	CHECK(ztinydis_one(0x400000, buf, 3, &d) == 0);
+	CHECK(d.len == 3);
+	CHECK(strcmp(d.text, "jmp r11") == 0);
+	CHECK(d.kind == ZINSN_JMP);
+	CHECK(d.is_branch);
+
+	/* call r11: 41 FF D3 */
+	buf[0] = 0x41; buf[1] = 0xff; buf[2] = 0xd3;
+	CHECK(ztinydis_one(0x400000, buf, 3, &d) == 0);
+	CHECK(d.len == 3);
+	CHECK(strcmp(d.text, "call r11") == 0);
+	CHECK(d.kind == ZINSN_CALL);
+	CHECK(d.is_call);
+
+	/* jmp rax (no REX): FF E0 */
+	buf[0] = 0xff; buf[1] = 0xe0;
+	CHECK(ztinydis_one(0x400000, buf, 2, &d) == 0);
+	CHECK(d.len == 2);
+	CHECK(strcmp(d.text, "jmp rax") == 0);
+
+	/* movabs r11, imm64: 49 BB <imm64-le>.  Existing B8+rd path
+	 * already decodes this; we only spot-check it here. */
+	buf[0] = 0x49; buf[1] = 0xbb;
+	buf[2] = 0x88; buf[3] = 0x77; buf[4] = 0x66; buf[5] = 0x55;
+	buf[6] = 0x44; buf[7] = 0x33; buf[8] = 0x22; buf[9] = 0x11;
+	CHECK(ztinydis_one(0x400000, buf, 10, &d) == 0);
+	CHECK(d.len == 10);
+	CHECK(strstr(d.text, "r11") != NULL);
+	CHECK(strstr(d.text, "0x1122334455667788") != NULL);
+}
+
 int
 main(void)
 {
@@ -312,6 +351,7 @@ main(void)
 	test_alu_simple();
 	test_unknown();
 	test_roundtrip();
+	test_indirect_r11();
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);

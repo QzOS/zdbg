@@ -391,6 +391,234 @@ test_jz_jnz_8_range(void)
 	MUST_EQ(ztinyasm_assemble(0x401000, "jnz8 0x401100", &enc, NULL), -1);
 }
 
+/*
+ * Build the expected `49 BB <imm64-le> 41 FF <op>` tail byte pattern
+ * into `want` starting at offset `off`.  `last` is 0xE3 for jmp r11
+ * or 0xD3 for call r11.
+ */
+static void
+build_movabs_tail(uint8_t *want, size_t off, uint64_t imm, uint8_t last)
+{
+	int i;
+	want[off + 0] = 0x49;
+	want[off + 1] = 0xbb;
+	for (i = 0; i < 8; i++)
+		want[off + 2 + i] = (uint8_t)((imm >> (i * 8)) & 0xff);
+	want[off + 10] = 0x41;
+	want[off + 11] = 0xff;
+	want[off + 12] = last;
+}
+
+static void
+test_jmpabs(void)
+{
+	struct ztinyasm enc;
+	char err[128];
+	uint8_t want[16];
+
+	last_resolve_calls = 0;
+	last_resolve_expr[0] = 0;
+	MUST_EQ(ztinyasm_assemble_ex(0x400000,
+	    "jmpabs kernel32:GetCurrentProcess", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 13);
+	if (last_resolve_calls != 1)
+		fail("jmpabs: resolver not called once", __LINE__);
+	if (strcmp(last_resolve_expr,
+	    "kernel32:GetCurrentProcess") != 0)
+		fail("jmpabs: operand not preserved", __LINE__);
+	build_movabs_tail(want, 0, 0x7fff00000000ULL, 0xe3);
+	if (!bytes_eq(enc.code, want, 13))
+		fail("jmpabs encoding", __LINE__);
+
+	/* Address-independent: same bytes regardless of `addr`. */
+	MUST_EQ(ztinyasm_assemble_ex(0xdeadbeefULL,
+	    "jmpabs kernel32:GetCurrentProcess", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	if (!bytes_eq(enc.code, want, 13))
+		fail("jmpabs not address-independent", __LINE__);
+}
+
+static void
+test_callabs(void)
+{
+	struct ztinyasm enc;
+	char err[128];
+	uint8_t want[16];
+
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "callabs foo", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 13);
+	build_movabs_tail(want, 0, 0x401000ULL, 0xd3);
+	if (!bytes_eq(enc.code, want, 13))
+		fail("callabs encoding", __LINE__);
+}
+
+static void
+test_jzabs(void)
+{
+	struct ztinyasm enc;
+	char err[128];
+	uint8_t want[16];
+
+	/* jzabs foo: 75 0D | movabs r11, 0x401000 | jmp r11 */
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jzabs foo", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 15);
+	want[0] = 0x75; want[1] = 0x0d;
+	build_movabs_tail(want, 2, 0x401000ULL, 0xe3);
+	if (!bytes_eq(enc.code, want, 15))
+		fail("jzabs encoding", __LINE__);
+
+	/* jeabs is an alias for jzabs */
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jeabs foo", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 15);
+	if (!bytes_eq(enc.code, want, 15))
+		fail("jeabs encoding (alias of jzabs)", __LINE__);
+}
+
+static void
+test_jnzabs(void)
+{
+	struct ztinyasm enc;
+	char err[128];
+	uint8_t want[16];
+
+	/* jnzabs foo: 74 0D | movabs r11, 0x401000 | jmp r11 */
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jnzabs foo", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 15);
+	want[0] = 0x74; want[1] = 0x0d;
+	build_movabs_tail(want, 2, 0x401000ULL, 0xe3);
+	if (!bytes_eq(enc.code, want, 15))
+		fail("jnzabs encoding", __LINE__);
+
+	/* jneabs is an alias for jnzabs */
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jneabs foo", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 15);
+	if (!bytes_eq(enc.code, want, 15))
+		fail("jneabs encoding (alias of jnzabs)", __LINE__);
+}
+
+static void
+test_abs_resolver_failure(void)
+{
+	struct ztinyasm enc;
+	char err[128];
+
+	/* Bad target expression -> bad target err for every abs form. */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jmpabs nope", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), -1);
+	if (strstr(err, "bad target expression") == NULL)
+		fail("jmpabs: expected bad target err", __LINE__);
+
+	err[0] = 0;
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "callabs nope", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), -1);
+	if (strstr(err, "bad target expression") == NULL)
+		fail("callabs: expected bad target err", __LINE__);
+
+	err[0] = 0;
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jzabs nope", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), -1);
+	if (strstr(err, "bad target expression") == NULL)
+		fail("jzabs: expected bad target err", __LINE__);
+
+	/* Missing operand */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jmpabs", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), -1);
+	if (strstr(err, "missing operand") == NULL)
+		fail("jmpabs: expected missing operand err", __LINE__);
+}
+
+static void
+test_abs_multitoken_operand(void)
+{
+	struct ztinyasm enc;
+	char err[128];
+
+	/* Multi-token operand: spaces preserved. */
+	last_resolve_expr[0] = 0;
+	MUST_EQ(ztinyasm_assemble_ex(0x400000, "jmpabs main + 20", &enc,
+	    fake_resolve, NULL, err, sizeof(err)), 0);
+	MUST_EQ(enc.len, 13);
+	if (strcmp(last_resolve_expr, "main + 20") != 0)
+		fail("jmpabs: multi-token operand not preserved", __LINE__);
+}
+
+static void
+test_abs_patch_length(void)
+{
+	uint8_t buf[16];
+	size_t out_len = 0;
+	char err[128];
+
+	/* jmpabs needs 13 bytes: 12-byte patch must be rejected. */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 12, "jmpabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), -1);
+	if (strstr(err, "exceeds patch length") == NULL)
+		fail("jmpabs 12: expected length err", __LINE__);
+
+	/* callabs likewise. */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 12, "callabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), -1);
+	if (strstr(err, "exceeds patch length") == NULL)
+		fail("callabs 12: expected length err", __LINE__);
+
+	/* jzabs/jnzabs need 15 bytes: 14-byte patch must be rejected. */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 14, "jzabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), -1);
+	if (strstr(err, "exceeds patch length") == NULL)
+		fail("jzabs 14: expected length err", __LINE__);
+
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 14, "jnzabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), -1);
+	if (strstr(err, "exceeds patch length") == NULL)
+		fail("jnzabs 14: expected length err", __LINE__);
+
+	/* Exact-fit and NOP-fill: 13-byte jmpabs in a 13-byte patch
+	 * succeeds; 14-byte patch succeeds and pads with one NOP. */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 13, "jmpabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), 0);
+	MUST_EQ(out_len, 13);
+	MUST_EQ(buf[0], 0x49);
+	MUST_EQ(buf[1], 0xbb);
+	MUST_EQ(buf[10], 0x41);
+	MUST_EQ(buf[11], 0xff);
+	MUST_EQ(buf[12], 0xe3);
+
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 14, "jmpabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), 0);
+	MUST_EQ(out_len, 14);
+	MUST_EQ(buf[13], 0x90);  /* NOP fill */
+
+	/* 15-byte jzabs in a 16-byte patch -> NOP-pads to 16. */
+	err[0] = 0;
+	MUST_EQ(ztinyasm_patch_ex(0x401000, 16, "jzabs foo", buf,
+	    sizeof(buf), &out_len, fake_resolve, NULL,
+	    err, sizeof(err)), 0);
+	MUST_EQ(out_len, 16);
+	MUST_EQ(buf[0], 0x75);
+	MUST_EQ(buf[1], 0x0d);
+	MUST_EQ(buf[15], 0x90);
+}
+
 static void
 test_err_messages(void)
 {
@@ -442,6 +670,13 @@ main(void)
 	test_no_operand_garbage();
 	test_jz_jnz_8_range();
 	test_err_messages();
+	test_jmpabs();
+	test_callabs();
+	test_jzabs();
+	test_jnzabs();
+	test_abs_resolver_failure();
+	test_abs_multitoken_operand();
+	test_abs_patch_length();
 
 	if (failures) {
 		fprintf(stderr, "%d failure(s)\n", failures);
