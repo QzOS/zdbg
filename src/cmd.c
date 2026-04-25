@@ -28,6 +28,7 @@
 #include "zdbg_patch.h"
 #include "zdbg_filter.h"
 #include "zdbg_actions.h"
+#include "zdbg_machine.h"
 #include "zdbg_stdio.h"
 
 #define RC_QUIT 1
@@ -350,6 +351,23 @@ refresh_regs(struct zdbg *d)
 {
 	if (!target_stopped(d))
 		return;
+	/*
+	 * Prefer the generic register-file API.  Fall back to the
+	 * legacy struct zregs path only if the backend rejects the
+	 * regfile call (older or non-x86 backends may not support
+	 * it for the active arch).
+	 */
+	if (ztarget_get_regfile(&d->target, d->arch_id,
+	    &d->regfile) == 0) {
+		d->have_regfile = 1;
+		/* Best-effort sync to legacy cache for x86-64 paths
+		 * that still consume struct zregs.  Future
+		 * architectures whose values do not map back are not
+		 * an error here. */
+		if (zregfile_to_zregs(&d->regfile, &d->regs) == 0)
+			d->have_regs = 1;
+		return;
+	}
 	if (ztarget_getregs(&d->target, &d->regs) == 0) {
 		d->have_regs = 1;
 		if (zregfile_from_zregs(&d->regfile, d->arch_id,
@@ -531,19 +549,19 @@ cmd_r(struct zdbg *d, struct toks *t)
 			printf("unknown register: %s\n", t->v[1]);
 			return -1;
 		}
-		/* Sync the legacy struct zregs and push back to the
-		 * backend so existing get/set paths stay consistent. */
-		if (zregfile_to_zregs(&d->regfile, &d->regs) < 0) {
-			printf("setregs failed\n");
-			return -1;
-		}
-		d->have_regs = 1;
+		/* Push the updated regfile back through the target
+		 * regfile API.  Sync the legacy struct zregs cache
+		 * best-effort for compatibility with code paths that
+		 * still consume it. */
 		if (target_stopped(d)) {
-			if (ztarget_setregs(&d->target, &d->regs) < 0) {
+			if (ztarget_set_regfile(&d->target, d->arch_id,
+			    &d->regfile) < 0) {
 				printf("setregs failed\n");
 				return -1;
 			}
 		}
+		if (zregfile_to_zregs(&d->regfile, &d->regs) == 0)
+			d->have_regs = 1;
 		return 0;
 	}
 	return 0;
@@ -4211,10 +4229,19 @@ static void
 report_initial_stop(struct zdbg *d)
 {
 	struct zstop st;
+	uint64_t pc = 0;
 
 	memset(&st, 0, sizeof(st));
 	st.reason = ZSTOP_INITIAL;
-	if (ztarget_getregs(&d->target, &d->regs) == 0) {
+	if (ztarget_get_regfile(&d->target, d->arch_id,
+	    &d->regfile) == 0) {
+		d->have_regfile = 1;
+		if (zregfile_to_zregs(&d->regfile, &d->regs) == 0)
+			d->have_regs = 1;
+		if (zregfile_get_role(&d->regfile, ZREG_ROLE_PC,
+		    &pc) == 0)
+			st.addr = pc;
+	} else if (ztarget_getregs(&d->target, &d->regs) == 0) {
 		d->have_regs = 1;
 		st.addr = d->regs.rip;
 	}
@@ -4249,6 +4276,51 @@ cmd_l(struct zdbg *d, struct toks *t)
 		printf("usage: l [path [args...]] (or pass target on "
 		    "command line)\n");
 		return -1;
+	}
+
+	/*
+	 * Inspect the executable's machine type up front so we
+	 * never silently launch an AArch64 (or otherwise
+	 * unsupported) binary into our x86-64 backend.  Detection
+	 * failure on the path is non-fatal here; only an explicit
+	 * unsupported architecture is rejected.
+	 */
+	{
+		enum zarch detected = ZARCH_NONE;
+		char errbuf[128];
+		int drc;
+
+		errbuf[0] = 0;
+		drc = zmachine_detect_file(argv[0], &detected,
+		    errbuf, sizeof(errbuf));
+		if (drc == 0) {
+			if (detected != ZARCH_X86_64) {
+				const struct zarch_ops *ops =
+				    zarch_get(detected);
+				const char *nm = (ops && ops->name) ?
+				    ops->name : "(unknown)";
+				printf("unsupported target architecture: "
+				    "%s (backend registers/control not "
+				    "implemented yet)\n", nm);
+				return -1;
+			}
+			if (zdbg_set_arch(d, detected) < 0) {
+				printf("could not select architecture for "
+				    "target\n");
+				return -1;
+			}
+		} else if (drc == -2) {
+			/* Detector classified the file but it is an
+			 * unsupported variant (ELF32, PE32, unknown
+			 * machine).  Refuse to launch. */
+			printf("%s\n",
+			    errbuf[0] != 0 ? errbuf :
+			    "unsupported target architecture");
+			return -1;
+		}
+		/* drc == -1: detection failed (file open, not an
+		 * executable).  Fall through and let the OS backend
+		 * report a launch failure with its own diagnostics. */
 	}
 
 	if (ztarget_launch(&d->target, argc, argv, &d->stdio) < 0) {

@@ -117,6 +117,20 @@ ztarget_setregs(struct ztarget *t, const struct zregs *r)
 }
 
 int
+ztarget_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf)
+{
+	return ZBACKEND(get_regfile)(t, arch, rf);
+}
+
+int
+ztarget_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf)
+{
+	return ZBACKEND(set_regfile)(t, arch, rf);
+}
+
+int
 ztarget_get_debugreg(struct ztarget *t, int regno, uint64_t *vp)
 {
 	return ZBACKEND(get_debugreg)(t, regno, vp);

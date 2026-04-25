@@ -750,10 +750,18 @@ The x86-only tinyasm/tinydis modules remain as the implementation
 behind the x86-64 ops table.
 
 The architecture is selected through `zdbg_select_arch_for_target()`
-(today always x86-64 because both backends are x86-64-only) and
-mutated via `zdbg_set_arch()`, which keeps `d->arch_id`, `d->arch`,
-and the breakpoint table in sync.  A future ELF e_machine / PE
-Machine detection step plugs in there.
+and mutated via `zdbg_set_arch()`, which keeps `d->arch_id`,
+`d->arch`, and the breakpoint table in sync.  At launch (`l path
+...`) the command layer also runs `zmachine_detect_file()` over
+the executable on disk: ELF64 with `EM_X86_64`/`EM_AARCH64` and
+PE32+ with `IMAGE_FILE_MACHINE_AMD64`/`IMAGE_FILE_MACHINE_ARM64`
+are recognized.  x86-64 is supported; AArch64 is recognized but
+rejected before launch because the backend register/control path
+is not implemented yet.  32-bit ELF/PE (ELFCLASS32, PE32) and
+unknown machine types are rejected with a clear message.
+Attach (`la`) does not yet detect the target's machine type and
+defaults to the active backend's x86-64 path; per-platform
+attach detection is future work.
 
 Register storage is still x86-64-shaped in the OS backends:
 `struct zregs` is laid out for x86-64 and `ztarget_getregs` /
@@ -768,6 +776,15 @@ canonical entry without duplicating state.  On x86-64:
 
     pc -> rip       sp -> rsp       fp -> rbp
     ip -> rip       flags -> rflags
+
+The target boundary itself now exposes a generic register-file
+API (`ztarget_get_regfile`, `ztarget_set_regfile`).  Command
+code refreshes registers and pushes register writes through
+those entry points; the Linux and Windows x86-64 backends
+implement them by adapting the existing `struct zregs`
+get/set path internally.  The legacy `ztarget_getregs` /
+`ztarget_setregs` remain available for backend internals and
+tests.
 
 The expression evaluator and condition evaluator have register-
 file-aware variants (`zexpr_eval_rf`, `zexpr_eval_symbols_rf`,
@@ -784,6 +801,8 @@ Limitations of this phase:
   AArch64 register backend is future work.
 * The AArch64 stub exposes an empty register file; every
   register lookup fails cleanly.
+* Attach machine detection is not implemented; attach defaults
+  to the currently supported x86-64 backend.
 
 For portable scripts, prefer the role aliases:
 
@@ -801,6 +820,7 @@ The legacy x86-64 names (`rip`, `rsp`, etc.) and the
         arch_aarch64.c  AArch64 stub ops
         regs.c          legacy x86-64 register helpers
         regfile.c       generic integer register-file view
+        machine.c       ELF64/PE32+ executable machine detection
         target.c        OS-agnostic dispatcher
         target_null.c   fallback backend (non-Linux, errors cleanly)
         os_linux/       Linux ptrace backend (real)

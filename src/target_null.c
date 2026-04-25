@@ -8,6 +8,7 @@
  */
 
 #include "zdbg_target.h"
+#include "zdbg_regfile.h"
 
 int
 ztarget_null_launch(struct ztarget *t, int argc, char **argv,
@@ -98,6 +99,22 @@ int
 ztarget_null_setregs(struct ztarget *t, const struct zregs *r)
 {
 	(void)t; (void)r;
+	return -1;
+}
+
+int
+ztarget_null_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf)
+{
+	(void)t; (void)arch; (void)rf;
+	return -1;
+}
+
+int
+ztarget_null_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf)
+{
+	(void)t; (void)arch; (void)rf;
 	return -1;
 }
 

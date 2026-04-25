@@ -73,6 +73,7 @@
 #endif
 
 #include "zdbg_target.h"
+#include "zdbg_regfile.h"
 #include "zdbg_signal.h"
 
 #ifndef __WALL
@@ -1260,6 +1261,38 @@ ztarget_linux_set_debugreg_all(struct ztarget *t, int regno, uint64_t v)
 }
 
 #endif /* __x86_64__ */
+
+/* ---------------- generic regfile wrappers ---------------- */
+
+int
+ztarget_linux_get_regfile(struct ztarget *t, enum zarch arch,
+    struct zreg_file *rf)
+{
+	struct zregs zr;
+
+	if (rf == NULL)
+		return -1;
+	if (arch != ZARCH_X86_64)
+		return -1;
+	if (ztarget_linux_getregs(t, &zr) < 0)
+		return -1;
+	return zregfile_from_zregs(rf, arch, &zr);
+}
+
+int
+ztarget_linux_set_regfile(struct ztarget *t, enum zarch arch,
+    const struct zreg_file *rf)
+{
+	struct zregs zr;
+
+	if (rf == NULL)
+		return -1;
+	if (arch != ZARCH_X86_64)
+		return -1;
+	if (zregfile_to_zregs(rf, &zr) < 0)
+		return -1;
+	return ztarget_linux_setregs(t, &zr);
+}
 
 /* ---------------- thread API ---------------- */
 
