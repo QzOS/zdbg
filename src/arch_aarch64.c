@@ -2,12 +2,12 @@
  * arch_aarch64.c - AArch64 target architecture ops table.
  *
  * Wraps the phase-1 AArch64 disassembler (arch_aarch64_dis.c)
- * behind the generic `struct zarch_ops` interface and supplies
- * the breakpoint instruction bytes plus PC-after-trap policy.
- * Assembly, conditional-jump inversion, register accessors, and
- * frame-pointer backtrace remain unsupported and return -1; the
- * register-print/get/set hooks are present but report unsupported
- * cleanly.
+ * and tiny patch encoder (arch_aarch64_asm.c) behind the generic
+ * `struct zarch_ops` interface, and supplies the breakpoint
+ * instruction bytes plus PC-after-trap policy.  Conditional-jump
+ * inversion, register accessors, and frame-pointer backtrace
+ * remain unsupported and return -1; the register-print/get/set
+ * hooks are present but report unsupported cleanly.
  *
  * The breakpoint instruction is the canonical `BRK #0` little
  * endian encoding, length 4.  The PC-after-trap correction is the
@@ -25,57 +25,6 @@
 
 /* BRK #0: 0xd4200000, encoded little-endian. */
 static const uint8_t aarch64_brk[4] = { 0x00, 0x00, 0x20, 0xd4 };
-
-static int
-aarch64_assemble_one(zaddr_t addr, const char *line,
-    uint8_t *buf, size_t buflen, size_t *lenp,
-    zarch_resolve_fn resolve, void *resolve_arg,
-    char *err, size_t errcap)
-{
-	(void)addr;
-	(void)line;
-	(void)buf;
-	(void)buflen;
-	(void)lenp;
-	(void)resolve;
-	(void)resolve_arg;
-	if (err != NULL && errcap > 0) {
-		const char *m =
-		    "assembly not supported for architecture aarch64";
-		size_t n = strlen(m);
-		if (n >= errcap)
-			n = errcap - 1;
-		memcpy(err, m, n);
-		err[n] = 0;
-	}
-	return -1;
-}
-
-static int
-aarch64_assemble_patch(zaddr_t addr, size_t patch_len, const char *line,
-    uint8_t *buf, size_t buflen, size_t *lenp,
-    zarch_resolve_fn resolve, void *resolve_arg,
-    char *err, size_t errcap)
-{
-	(void)addr;
-	(void)patch_len;
-	(void)line;
-	(void)buf;
-	(void)buflen;
-	(void)lenp;
-	(void)resolve;
-	(void)resolve_arg;
-	if (err != NULL && errcap > 0) {
-		const char *m =
-		    "patch assembly not supported for architecture aarch64";
-		size_t n = strlen(m);
-		if (n >= errcap)
-			n = errcap - 1;
-		memcpy(err, m, n);
-		err[n] = 0;
-	}
-	return -1;
-}
 
 static int
 aarch64_invert_jcc(uint8_t *buf, size_t len, size_t *usedp)
@@ -156,8 +105,8 @@ static const struct zarch_ops aarch64_ops = {
 	.breakpoint_len = sizeof(aarch64_brk),
 	.decode_one = zaarch64_decode_one,
 	.fallthrough = zaarch64_fallthrough,
-	.assemble_one = aarch64_assemble_one,
-	.assemble_patch = aarch64_assemble_patch,
+	.assemble_one = zaarch64_assemble_one,
+	.assemble_patch = zaarch64_assemble_patch,
 	.invert_jcc = aarch64_invert_jcc,
 	.get_pc = aarch64_unsupported_get,
 	.set_pc = aarch64_unsupported_set,
