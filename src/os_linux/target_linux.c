@@ -55,6 +55,7 @@
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -339,8 +340,110 @@ zl_attach_new_tasks(struct zlinux_target *lt)
 
 /* ---------------- launch / attach / detach / kill ---------------- */
 
+/*
+ * Apply a stdio configuration in the child after fork() but
+ * before execvp().  All slot fds are set up via dup2() onto
+ * STDIN_FILENO/STDOUT_FILENO/STDERR_FILENO so they survive exec.
+ *
+ * On any open() failure the function returns -1 without writing
+ * to the parent's terminal; the caller is expected to _exit().
+ * INHERIT slots are left untouched (the child already inherits
+ * the parent's std fds).
+ */
+static int
+zl_apply_stdio_child(const struct zstdio_config *c)
+{
+	int in_fd = -1, out_fd = -1, err_fd = -1;
+
+	if (c == NULL)
+		return 0;
+
+	/* stdin */
+	switch (c->in.mode) {
+	case ZSTDIO_INHERIT:
+		break;
+	case ZSTDIO_NULL:
+		in_fd = open("/dev/null", O_RDONLY);
+		break;
+	case ZSTDIO_FILE:
+		in_fd = open(c->in.path, O_RDONLY);
+		break;
+	default:
+		errno = EINVAL;
+		return -1;
+	}
+	if (c->in.mode != ZSTDIO_INHERIT) {
+		if (in_fd < 0)
+			return -1;
+		if (dup2(in_fd, STDIN_FILENO) < 0) {
+			(void)close(in_fd);
+			return -1;
+		}
+		(void)close(in_fd);
+	}
+
+	/* stdout */
+	switch (c->out.mode) {
+	case ZSTDIO_INHERIT:
+		break;
+	case ZSTDIO_NULL:
+		out_fd = open("/dev/null", O_WRONLY);
+		break;
+	case ZSTDIO_FILE:
+	case ZSTDIO_CAPTURE:
+		out_fd = open(c->out.path,
+		    O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		break;
+	default:
+		errno = EINVAL;
+		return -1;
+	}
+	if (c->out.mode != ZSTDIO_INHERIT) {
+		if (out_fd < 0)
+			return -1;
+		if (dup2(out_fd, STDOUT_FILENO) < 0) {
+			(void)close(out_fd);
+			return -1;
+		}
+		(void)close(out_fd);
+	}
+
+	/* stderr */
+	switch (c->err.mode) {
+	case ZSTDIO_INHERIT:
+		break;
+	case ZSTDIO_NULL:
+		err_fd = open("/dev/null", O_WRONLY);
+		break;
+	case ZSTDIO_FILE:
+	case ZSTDIO_CAPTURE:
+		err_fd = open(c->err.path,
+		    O_WRONLY | O_CREAT | O_TRUNC, 0644);
+		break;
+	case ZSTDIO_STDOUT:
+		/* Duplicate whatever stdout is now (inherited or set). */
+		if (dup2(STDOUT_FILENO, STDERR_FILENO) < 0)
+			return -1;
+		return 0;
+	default:
+		errno = EINVAL;
+		return -1;
+	}
+	if (c->err.mode != ZSTDIO_INHERIT) {
+		if (err_fd < 0)
+			return -1;
+		if (dup2(err_fd, STDERR_FILENO) < 0) {
+			(void)close(err_fd);
+			return -1;
+		}
+		(void)close(err_fd);
+	}
+	return 0;
+}
+
 int
-ztarget_linux_launch(struct ztarget *t, int argc, char **argv)
+ztarget_linux_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg)
 {
 	struct zlinux_target *lt;
 	struct zlinux_thread *th;
@@ -362,7 +465,9 @@ ztarget_linux_launch(struct ztarget *t, int argc, char **argv)
 		return -1;
 	}
 	if (pid == 0) {
-		/* Child: enable tracing and exec the target. */
+		/* Child: set up stdio, enable tracing, exec the target. */
+		if (zl_apply_stdio_child(stdio_cfg) < 0)
+			_exit(127);
 		if (ptrace(PTRACE_TRACEME, 0, (void *)0, (void *)0) < 0)
 			_exit(127);
 		execvp(argv[0], argv);

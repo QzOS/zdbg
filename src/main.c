@@ -29,6 +29,7 @@
 
 #include "zdbg.h"
 #include "zdbg_cmd.h"
+#include "zdbg_stdio.h"
 
 #define ZDBG_MAX_SCRIPT_FILES 16
 
@@ -58,6 +59,14 @@ usage(FILE *fp)
 	    "  -q, --quiet          suppress banner and prompts\n"
 	    "  -v, --verbose        echo script commands before execution\n"
 	    "      --no-init        do not load $HOME/.zdbgrc startup file\n"
+	    "      --stdin PATH     redirect target stdin from file\n"
+	    "      --stdout PATH    redirect target stdout to file\n"
+	    "      --stderr PATH    redirect target stderr to file\n"
+	    "      --capture-stdout configure file-backed stdout capture\n"
+	    "      --capture-stderr configure file-backed stderr capture\n"
+	    "      --null-stdin     send EOF on target stdin\n"
+	    "      --null-stdout    discard target stdout\n"
+	    "      --null-stderr    discard target stderr\n"
 	    "  -h, --help           show this help and exit\n"
 	    "      --version        show version and exit\n"
 	    "      --               end of zdbg options\n"
@@ -84,6 +93,14 @@ struct zdbg_opts {
 	int no_init;
 	int target_argc;
 	char **target_argv;
+	const char *stdin_path;
+	const char *stdout_path;
+	const char *stderr_path;
+	int capture_stdout;
+	int capture_stderr;
+	int null_stdin;
+	int null_stdout;
+	int null_stderr;
 };
 
 /*
@@ -148,6 +165,53 @@ parse_opts(int argc, char **argv, struct zdbg_opts *o)
 				return -1;
 			}
 			o->scripts[o->nscripts++] = argv[++i];
+			continue;
+		}
+		if (strcmp(a, "--stdin") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr,
+				    "zdbg: %s requires a path\n", a);
+				return -1;
+			}
+			o->stdin_path = argv[++i];
+			continue;
+		}
+		if (strcmp(a, "--stdout") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr,
+				    "zdbg: %s requires a path\n", a);
+				return -1;
+			}
+			o->stdout_path = argv[++i];
+			continue;
+		}
+		if (strcmp(a, "--stderr") == 0) {
+			if (i + 1 >= argc) {
+				fprintf(stderr,
+				    "zdbg: %s requires a path\n", a);
+				return -1;
+			}
+			o->stderr_path = argv[++i];
+			continue;
+		}
+		if (strcmp(a, "--capture-stdout") == 0) {
+			o->capture_stdout = 1;
+			continue;
+		}
+		if (strcmp(a, "--capture-stderr") == 0) {
+			o->capture_stderr = 1;
+			continue;
+		}
+		if (strcmp(a, "--null-stdin") == 0) {
+			o->null_stdin = 1;
+			continue;
+		}
+		if (strcmp(a, "--null-stdout") == 0) {
+			o->null_stdout = 1;
+			continue;
+		}
+		if (strcmp(a, "--null-stderr") == 0) {
+			o->null_stderr = 1;
 			continue;
 		}
 		fprintf(stderr, "zdbg: unknown option: %s\n", a);
@@ -231,6 +295,51 @@ main(int argc, char **argv)
 	if (o.target_argc > 0) {
 		d.target_argc = o.target_argc;
 		d.target_argv = o.target_argv;
+	}
+
+	/* Apply CLI stdio options before any -x script may run `l`. */
+	if (o.null_stdin)
+		(void)zstdio_set_null(&d.stdio.in);
+	else if (o.stdin_path != NULL) {
+		if (zstdio_set_file(&d.stdio.in, o.stdin_path) < 0) {
+			fprintf(stderr, "zdbg: --stdin: bad path\n");
+			zdbg_fini(&d);
+			return ZDBG_EXIT_SETUP;
+		}
+	}
+	if (o.null_stdout)
+		(void)zstdio_set_null(&d.stdio.out);
+	else if (o.capture_stdout) {
+		if (zstdio_set_capture(&d.stdio.out, "stdout") < 0) {
+			fprintf(stderr, "zdbg: --capture-stdout failed\n");
+			zdbg_fini(&d);
+			return ZDBG_EXIT_SETUP;
+		}
+		if (!o.quiet)
+			printf("stdout capture: %s\n", d.stdio.out.path);
+	} else if (o.stdout_path != NULL) {
+		if (zstdio_set_file(&d.stdio.out, o.stdout_path) < 0) {
+			fprintf(stderr, "zdbg: --stdout: bad path\n");
+			zdbg_fini(&d);
+			return ZDBG_EXIT_SETUP;
+		}
+	}
+	if (o.null_stderr)
+		(void)zstdio_set_null(&d.stdio.err);
+	else if (o.capture_stderr) {
+		if (zstdio_set_capture(&d.stdio.err, "stderr") < 0) {
+			fprintf(stderr, "zdbg: --capture-stderr failed\n");
+			zdbg_fini(&d);
+			return ZDBG_EXIT_SETUP;
+		}
+		if (!o.quiet)
+			printf("stderr capture: %s\n", d.stdio.err.path);
+	} else if (o.stderr_path != NULL) {
+		if (zstdio_set_file(&d.stdio.err, o.stderr_path) < 0) {
+			fprintf(stderr, "zdbg: --stderr: bad path\n");
+			zdbg_fini(&d);
+			return ZDBG_EXIT_SETUP;
+		}
 	}
 
 	if (!o.quiet && !o.batch)

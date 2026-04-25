@@ -29,6 +29,7 @@
 #include "zdbg_patch.h"
 #include "zdbg_filter.h"
 #include "zdbg_actions.h"
+#include "zdbg_stdio.h"
 
 #define RC_QUIT 1
 
@@ -174,6 +175,8 @@ print_help(void)
 	    "exception\n"
 	    "  handle [sig [opts]]  show/set signal/exception stop/pass/"
 	    "print policy\n"
+	    "  io [reset|stdin|stdout|stderr|show|path ...]\n"
+	    "                       configure target stdin/stdout/stderr\n"
 	    "  source path          execute commands from script file\n"
 	    "  . path                alias for source\n"
 	    "  check ...            script-friendly assertion (see README)\n"
@@ -4176,7 +4179,7 @@ cmd_l(struct zdbg *d, struct toks *t)
 		return -1;
 	}
 
-	if (ztarget_launch(&d->target, argc, argv) < 0) {
+	if (ztarget_launch(&d->target, argc, argv, &d->stdio) < 0) {
 		printf("launch failed\n");
 		return -1;
 	}
@@ -6156,6 +6159,252 @@ cmd_check(struct zdbg *d, struct toks *t)
 	return check_fail("unknown subcommand: %s", sub);
 }
 
+/* ---------------- io: target stdio configuration ---------------- */
+
+static void
+io_print_slot(const char *name, const struct zstdio_slot *s)
+{
+	char buf[ZDBG_STDIO_PATH_MAX + 64];
+
+	zstdio_describe(s, buf, sizeof(buf));
+	printf("%-7s %s\n", name, buf);
+}
+
+static void
+io_show_config(const struct zstdio_config *c)
+{
+	io_print_slot("stdin:",  &c->in);
+	io_print_slot("stdout:", &c->out);
+	io_print_slot("stderr:", &c->err);
+}
+
+static int
+io_set_stdin(struct zdbg *d, int argc, char **argv)
+{
+	if (argc < 1) {
+		printf("usage: io stdin inherit|null|PATH\n");
+		return -1;
+	}
+	if (strcmp(argv[0], "inherit") == 0)
+		return zstdio_set_inherit(&d->stdio.in);
+	if (strcmp(argv[0], "null") == 0)
+		return zstdio_set_null(&d->stdio.in);
+	if (strcmp(argv[0], "capture") == 0 ||
+	    strcmp(argv[0], "stdout") == 0) {
+		printf("io stdin: invalid mode '%s'\n", argv[0]);
+		return -1;
+	}
+	if (zstdio_set_file(&d->stdio.in, argv[0]) < 0) {
+		printf("io stdin: bad path\n");
+		return -1;
+	}
+	return 0;
+}
+
+static int
+io_set_stdout(struct zdbg *d, int argc, char **argv)
+{
+	if (argc < 1) {
+		printf("usage: io stdout inherit|null|capture|PATH\n");
+		return -1;
+	}
+	if (strcmp(argv[0], "inherit") == 0)
+		return zstdio_set_inherit(&d->stdio.out);
+	if (strcmp(argv[0], "null") == 0)
+		return zstdio_set_null(&d->stdio.out);
+	if (strcmp(argv[0], "capture") == 0) {
+		if (zstdio_set_capture(&d->stdio.out, "stdout") < 0) {
+			printf("io stdout: capture path failed\n");
+			return -1;
+		}
+		printf("stdout capture: %s\n", d->stdio.out.path);
+		return 0;
+	}
+	if (strcmp(argv[0], "stdout") == 0) {
+		printf("io stdout: invalid mode 'stdout'\n");
+		return -1;
+	}
+	if (zstdio_set_file(&d->stdio.out, argv[0]) < 0) {
+		printf("io stdout: bad path\n");
+		return -1;
+	}
+	return 0;
+}
+
+static int
+io_set_stderr(struct zdbg *d, int argc, char **argv)
+{
+	if (argc < 1) {
+		printf("usage: io stderr inherit|null|capture|stdout|PATH\n");
+		return -1;
+	}
+	if (strcmp(argv[0], "inherit") == 0)
+		return zstdio_set_inherit(&d->stdio.err);
+	if (strcmp(argv[0], "null") == 0)
+		return zstdio_set_null(&d->stdio.err);
+	if (strcmp(argv[0], "stdout") == 0)
+		return zstdio_set_stdout(&d->stdio.err);
+	if (strcmp(argv[0], "capture") == 0) {
+		if (zstdio_set_capture(&d->stdio.err, "stderr") < 0) {
+			printf("io stderr: capture path failed\n");
+			return -1;
+		}
+		printf("stderr capture: %s\n", d->stdio.err.path);
+		return 0;
+	}
+	if (zstdio_set_file(&d->stdio.err, argv[0]) < 0) {
+		printf("io stderr: bad path\n");
+		return -1;
+	}
+	return 0;
+}
+
+static const struct zstdio_slot *
+io_pick_slot(const struct zdbg *d, const char *which)
+{
+	if (which == NULL)
+		return NULL;
+	if (strcmp(which, "stdout") == 0)
+		return &d->stdio.out;
+	if (strcmp(which, "stderr") == 0)
+		return &d->stdio.err;
+	return NULL;
+}
+
+static int
+io_path(struct zdbg *d, int argc, char **argv)
+{
+	const struct zstdio_slot *s;
+	const char *p;
+
+	if (argc < 1) {
+		printf("usage: io path stdout|stderr\n");
+		return -1;
+	}
+	s = io_pick_slot(d, argv[0]);
+	if (s == NULL) {
+		printf("io path: expected stdout or stderr\n");
+		return -1;
+	}
+	p = zstdio_slot_path(s);
+	if (p == NULL) {
+		printf("%s has no file path\n", argv[0]);
+		return -1;
+	}
+	printf("%s\n", p);
+	return 0;
+}
+
+static int
+io_show(struct zdbg *d, int argc, char **argv)
+{
+	const struct zstdio_slot *s;
+	const char *p;
+	long limit;
+	long total = 0;
+	FILE *fp;
+	char buf[1024];
+	size_t n;
+
+	if (argc < 1) {
+		printf("usage: io show stdout|stderr [limit]\n");
+		return -1;
+	}
+	s = io_pick_slot(d, argv[0]);
+	if (s == NULL) {
+		printf("io show: expected stdout or stderr\n");
+		return -1;
+	}
+	p = zstdio_slot_path(s);
+	if (p == NULL) {
+		printf("%s has no capture/file path\n", argv[0]);
+		return -1;
+	}
+	limit = 4096;
+	if (argc >= 2) {
+		uint64_t v;
+
+		if (zexpr_eval(argv[1], NULL, &v) < 0) {
+			printf("io show: bad limit\n");
+			return -1;
+		}
+		limit = (long)v;
+		if (limit < 0)
+			limit = 0;
+	}
+	fp = fopen(p, "rb");
+	if (fp == NULL) {
+		printf("io show: cannot open %s\n", p);
+		return -1;
+	}
+	{
+		int last = -1;
+
+		while (total < limit) {
+			size_t want = sizeof(buf);
+
+			if ((long)want > limit - total)
+				want = (size_t)(limit - total);
+			n = fread(buf, 1, want, fp);
+			if (n == 0)
+				break;
+			fwrite(buf, 1, n, stdout);
+			total += (long)n;
+			last = (unsigned char)buf[n - 1];
+		}
+		if (total > 0 && last != '\n')
+			fputc('\n', stdout);
+	}
+	fclose(fp);
+	return 0;
+}
+
+static int
+cmd_io(struct zdbg *d, struct toks *t)
+{
+	struct cmd_qargs a;
+	const char *line;
+	const char *sub;
+	int argc;
+	char **argv;
+
+	line = rest_from(t->orig, 1);
+	while (*line == ' ' || *line == '\t')
+		line++;
+	if (line[0] == 0) {
+		io_show_config(&d->stdio);
+		return 0;
+	}
+	if (cmd_qsplit(line, &a) < 0) {
+		printf("io: argument list too long\n");
+		return -1;
+	}
+	if (a.n < 1) {
+		io_show_config(&d->stdio);
+		return 0;
+	}
+	argc = a.n;
+	argv = a.v;
+	sub = argv[0];
+
+	if (strcmp(sub, "reset") == 0) {
+		zstdio_config_reset(&d->stdio);
+		return 0;
+	}
+	if (strcmp(sub, "stdin") == 0)
+		return io_set_stdin(d, argc - 1, argv + 1);
+	if (strcmp(sub, "stdout") == 0)
+		return io_set_stdout(d, argc - 1, argv + 1);
+	if (strcmp(sub, "stderr") == 0)
+		return io_set_stderr(d, argc - 1, argv + 1);
+	if (strcmp(sub, "show") == 0)
+		return io_show(d, argc - 1, argv + 1);
+	if (strcmp(sub, "path") == 0)
+		return io_path(d, argc - 1, argv + 1);
+	printf("io: unknown subcommand: %s\n", sub);
+	return -1;
+}
+
 /* --- top-level dispatch --------------------------------------- */
 
 void
@@ -6174,6 +6423,7 @@ zdbg_init(struct zdbg *d)
 	zsig_table_init(&d->sigs);
 	zexc_table_init(&d->excs);
 	zpatch_table_init(&d->patches);
+	zstdio_config_init(&d->stdio);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
@@ -6357,6 +6607,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_ex(d, &t);
 	if (strcmp(mn, "handle") == 0)
 		return cmd_handle(d, &t);
+	if (strcmp(mn, "io") == 0)
+		return cmd_io(d, &t);
 	if (strcmp(mn, "check") == 0) {
 		check_word = "check";
 		return cmd_check(d, &t);

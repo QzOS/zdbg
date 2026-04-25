@@ -49,7 +49,7 @@ main(void)
 	argv[1] = NULL;
 
 	ztarget_init(&tgt);
-	rc = ztarget_launch(&tgt, 1, argv);
+	rc = ztarget_launch(&tgt, 1, argv, NULL);
 	if (rc < 0) {
 		/*
 		 * Some sandboxes block CreateProcess with the debug

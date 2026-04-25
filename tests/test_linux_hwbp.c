@@ -84,7 +84,7 @@ main(void)
 	argv[0] = (char *)"/bin/sleep";
 	argv[1] = (char *)"30";
 	argv[2] = NULL;
-	if (ztarget_launch(&tgt, 2, argv) < 0) {
+	if (ztarget_launch(&tgt, 2, argv, NULL) < 0) {
 		printf("SKIP: launch failed (errno=%d)\n", errno);
 		ztarget_fini(&tgt);
 		return 0;

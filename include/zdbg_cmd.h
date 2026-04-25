@@ -17,6 +17,7 @@
 #include "zdbg_exception.h"
 #include "zdbg_symbols.h"
 #include "zdbg_patch.h"
+#include "zdbg_stdio.h"
 
 struct zdbg {
 	struct ztarget target;
@@ -59,6 +60,7 @@ struct zdbg {
 	int verbose;		/* echo script commands before executing. */
 	int quiet;		/* suppress banner and prompts. */
 	int in_action;		/* recursion guard for breakpoint action lists. */
+	struct zstdio_config stdio;	/* applied at next launch */
 };
 
 #define ZDBG_MAX_SOURCE_DEPTH 8

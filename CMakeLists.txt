@@ -32,7 +32,8 @@ set(ZDBG_CORE_SOURCES
     src/patch.c
     src/pe.c
     src/cmd.c
-    src/repl.c)
+    src/repl.c
+    src/stdio.c)
 
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND ZDBG_CORE_SOURCES src/os_linux/target_linux.c)
@@ -58,6 +59,15 @@ set_target_properties(testprog PROPERTIES
 if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
    CMAKE_C_COMPILER_ID MATCHES "Clang")
     target_compile_options(testprog PRIVATE -O0 -g -fno-omit-frame-pointer)
+endif()
+
+# Tiny portable stdio echo target for io tests.
+add_executable(testio examples/testio.c)
+set_target_properties(testio PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/examples")
+if(CMAKE_C_COMPILER_ID STREQUAL "GNU" OR
+   CMAKE_C_COMPILER_ID MATCHES "Clang")
+    target_compile_options(testio PRIVATE -O0 -g)
 endif()
 
 # Multi-threaded example for manual thread-awareness sessions

@@ -10,9 +10,10 @@
 #include "zdbg_target.h"
 
 int
-ztarget_null_launch(struct ztarget *t, int argc, char **argv)
+ztarget_null_launch(struct ztarget *t, int argc, char **argv,
+    const struct zstdio_config *stdio_cfg)
 {
-	(void)t; (void)argc; (void)argv;
+	(void)t; (void)argc; (void)argv; (void)stdio_cfg;
 	return -1;
 }
 
