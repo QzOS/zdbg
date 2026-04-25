@@ -1,0 +1,18 @@
+; assert-patch.zdbg - exercises patch-state assertions.
+;
+; Usage:
+;   zdbg --batch -q -x examples/scripts/assert-patch.zdbg \
+;       ./build/examples/testprog
+;
+; The script writes a single 0x90 (NOP) at RIP, asserts the
+; resulting patch is recorded as applied, reverts it, and
+; asserts it is now reverted.  Patching at the initial trap RIP
+; is safe on Linux because we never resume after the patch.
+
+l
+check stopped
+e rip 90
+check patch 0 applied
+pu 0
+check patch 0 reverted
+q

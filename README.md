@@ -249,6 +249,56 @@ print a warning but are not fatal.  Pass `--no-init` to skip it.
 In interactive mode (no script, no `--batch`) command failures
 are reported but do not terminate the REPL.
 
+### Script-friendly assertions
+
+The `check` command family lets scripts verify debugger state
+without introducing a scripting language: every check is a
+single line that returns command-failure on mismatch.  In batch
+or `-x` script mode this stops the script and produces exit
+code 1; in interactive mode the failure is reported but the
+REPL keeps running.
+
+    check target                    target object exists
+    check stopped                   target is stopped
+    check running                   target is running
+    check exited [code]             target exited (optionally with code)
+    check stop reason               last stop reason matches
+                                    (initial|breakpoint|singlestep|
+                                     signal|exception|exit|hwbp|
+                                     watchpoint|error)
+    check thread [tid|current]      selected thread matches
+    check reg name value            register equals expression
+    check rip expr                  alias for `check reg rip expr`
+    check mem addr pattern          memory bytes/string/value match
+                                    (raw bytes, -str, -wstr, -u32,
+                                     -u64, -ptr same as `s`)
+    check symbol name               symbol resolves (rejects raw numbers)
+    check nosymbol name             symbol does not resolve
+    check map expr                  address belongs to a known map/region
+    check patch id applied|reverted patch state matches
+    check bp id enabled|disabled|installed|removed
+    check hwbp id enabled|disabled
+    check file path exists          host file exists (quoted paths ok)
+    check file path size n          host file is exactly n bytes long
+    assert ...                      alias for check
+
+Successful checks print nothing.  Failed checks print a single
+line beginning with `check failed:` (or `assert failed:` /
+`expect failed:` for the aliases).  Example:
+
+    l
+    check stopped
+    check symbol main
+    b main
+    g
+    check stop breakpoint
+    check rip main
+    q
+
+A simple smoke and patch script live under
+`examples/scripts/assert-smoke.zdbg` and
+`examples/scripts/assert-patch.zdbg`.
+
 ## Command sketch
 
     ?                    help
@@ -321,6 +371,8 @@ are reported but do not terminate the REPL.
                          Linux, or Windows exception policy on Windows
     source path          execute commands from script file
     . path                alias for source
+    check ...            script-friendly assertion (see below)
+    assert ...           alias for check
 
 Address expressions accept raw numbers (default hex), registers
 (`rip+10`), and — on Linux, after a target has been
