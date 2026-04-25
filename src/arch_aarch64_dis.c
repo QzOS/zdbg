@@ -537,7 +537,7 @@ decode_ldstp(uint32_t insn, struct zdecode *out)
 	default:
 		return 0;       /* idx=00 STNP/LDNP */
 	}
-	out->kind = L ? ZINSN_OTHER : ZINSN_OTHER;
+	out->kind = ZINSN_OTHER;
 	return 1;
 }
 
