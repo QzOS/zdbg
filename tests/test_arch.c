@@ -154,6 +154,77 @@ test_x86_regs(void)
 }
 
 static int
+test_x86_assemble_one(void)
+{
+	const struct zarch_ops *x = zarch_get(ZARCH_X86_64);
+	uint8_t buf[ZDBG_MAX_INSN_BYTES];
+	size_t out_len = 0;
+	char err[64];
+
+	CHECK(x->assemble_one != NULL);
+
+	memset(buf, 0xee, sizeof(buf));
+	err[0] = 0;
+	CHECK(x->assemble_one(0x400000, "nop", buf, sizeof(buf), &out_len,
+	    resolve_number, NULL, err, sizeof(err)) == 0);
+	CHECK(out_len == 1);
+	CHECK(buf[0] == 0x90);
+	/* assemble_one must NOT NOP-pad: byte after the encoding is
+	 * untouched */
+	CHECK(buf[1] == 0xee);
+
+	memset(buf, 0xee, sizeof(buf));
+	out_len = 0;
+	CHECK(x->assemble_one(0x400000, "int3", buf, sizeof(buf),
+	    &out_len, resolve_number, NULL, err, sizeof(err)) == 0);
+	CHECK(out_len == 1);
+	CHECK(buf[0] == 0xcc);
+
+	memset(buf, 0xee, sizeof(buf));
+	out_len = 0;
+	CHECK(x->assemble_one(0x400000, "jmpabs 0xdeadbeefcafebabe",
+	    buf, sizeof(buf), &out_len, resolve_number, NULL, err,
+	    sizeof(err)) == 0);
+	CHECK(out_len == 13);
+	CHECK(buf[0] == 0x49 && buf[1] == 0xbb);
+	CHECK(buf[2] == 0xbe);
+	CHECK(buf[9] == 0xde);
+	CHECK(buf[10] == 0x41 && buf[11] == 0xff && buf[12] == 0xe3);
+	/* no NOP padding past the encoding */
+	CHECK(buf[13] == 0xee);
+	return 0;
+}
+
+static int
+test_x86_reg_hooks(void)
+{
+	const struct zarch_ops *x = zarch_get(ZARCH_X86_64);
+	struct zregs r;
+	uint64_t v = 0;
+
+	CHECK(x->regs_print != NULL);
+	CHECK(x->regs_get_by_name != NULL);
+	CHECK(x->regs_set_by_name != NULL);
+	memset(&r, 0, sizeof(r));
+	r.rip = 0x401000;
+	r.rsp = 0x7fff0000;
+	r.rbp = 0x7fff0010;
+	r.rax = 0x1122334455667788ULL;
+	CHECK(x->regs_get_by_name(&r, "rip", &v) == 0 && v == 0x401000);
+	CHECK(x->regs_get_by_name(&r, "rsp", &v) == 0 && v == 0x7fff0000);
+	CHECK(x->regs_get_by_name(&r, "rbp", &v) == 0 && v == 0x7fff0010);
+	CHECK(x->regs_get_by_name(&r, "rax", &v) == 0 &&
+	    v == 0x1122334455667788ULL);
+	CHECK(x->regs_set_by_name(&r, "rip", 0x402000) == 0);
+	CHECK(r.rip == 0x402000);
+	CHECK(x->regs_set_by_name(&r, "rax", 0x42) == 0);
+	CHECK(r.rax == 0x42);
+	CHECK(x->regs_get_by_name(&r, "nosuch", &v) == -1);
+	CHECK(x->regs_set_by_name(&r, "nosuch", 0) == -1);
+	return 0;
+}
+
+static int
 test_aarch64_breakpoint(void)
 {
 	const struct zarch_ops *a = zarch_get(ZARCH_AARCH64);
@@ -201,6 +272,26 @@ test_aarch64_unsupported(void)
 	CHECK(a->set_pc(&r, 0x1000) == -1);
 	CHECK(a->get_sp(&r, &v) == -1);
 	CHECK(a->get_fp(&r, &v) == -1);
+
+	/* assemble_one: unsupported with diagnostic */
+	err[0] = 0;
+	out_len = 0;
+	CHECK(a->assemble_one != NULL);
+	CHECK(a->assemble_one(0x1000, "nop", buf, sizeof(buf), &out_len,
+	    resolve_number, NULL, err, sizeof(err)) == -1);
+	CHECK(err[0] != 0);
+	CHECK(strstr(err, "aarch64") != NULL);
+
+	/* register hooks: present and unsupported */
+	CHECK(a->regs_print != NULL);
+	CHECK(a->regs_get_by_name != NULL);
+	CHECK(a->regs_set_by_name != NULL);
+	CHECK(a->regs_get_by_name(&r, "x0", &(uint64_t){0}) == -1);
+	CHECK(a->regs_set_by_name(&r, "x0", 0) == -1);
+
+	/* backtrace: unsupported */
+	CHECK(a->backtrace_fp != NULL);
+	CHECK(a->backtrace_fp(NULL, &r, NULL, 1, NULL, NULL) == -1);
 	return 0;
 }
 
@@ -212,6 +303,8 @@ main(void)
 	if (test_x86_decode_call()) return 1;
 	if (test_x86_assemble_patch_jmpabs()) return 1;
 	if (test_x86_regs()) return 1;
+	if (test_x86_assemble_one()) return 1;
+	if (test_x86_reg_hooks()) return 1;
 	if (test_aarch64_breakpoint()) return 1;
 	if (test_aarch64_unsupported()) return 1;
 	printf("test_arch ok\n");

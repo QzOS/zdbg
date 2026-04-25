@@ -9,11 +9,14 @@
  * `struct zdecode`.
  */
 
+#include <stddef.h>
 #include <string.h>
 
 #include "zdbg_arch.h"
 #include "zdbg_arch_x86_64.h"
+#include "zdbg_maps.h"
 #include "zdbg_regs.h"
+#include "zdbg_target.h"
 #include "zdbg_tinyasm.h"
 #include "zdbg_tinydis.h"
 
@@ -74,6 +77,35 @@ x86_64_fallthrough(const struct zdecode *d)
 	if (d == NULL || d->len == 0)
 		return 0;
 	return d->addr + (zaddr_t)d->len;
+}
+
+static int
+x86_64_assemble_one(zaddr_t addr, const char *line,
+    uint8_t *buf, size_t buflen, size_t *lenp,
+    zarch_resolve_fn resolve, void *resolve_arg,
+    char *err, size_t errcap)
+{
+	struct ztinyasm enc;
+
+	if (buf == NULL || lenp == NULL)
+		return -1;
+	if (ztinyasm_assemble_ex(addr, line, &enc,
+	    (ztinyasm_resolve_fn)resolve, resolve_arg, err, errcap) < 0)
+		return -1;
+	if (enc.len > buflen) {
+		if (err != NULL && errcap > 0) {
+			const char *m = "instruction too long";
+			size_t n = strlen(m);
+			if (n >= errcap)
+				n = errcap - 1;
+			memcpy(err, m, n);
+			err[n] = 0;
+		}
+		return -1;
+	}
+	memcpy(buf, enc.code, enc.len);
+	*lenp = enc.len;
+	return 0;
 }
 
 static int
@@ -140,23 +172,113 @@ x86_64_breakpoint_pc_after_trap(zaddr_t pc)
 	return pc - 1;
 }
 
+/*
+ * x86-64 user-space canonical user-half check.  Identical to the
+ * conservative check the command layer used to do inline.
+ */
+static int
+x86_64_canon_user(uint64_t a)
+{
+	if (a < 0x1000)
+		return 0;
+	if (a >= 0x0000800000000000ULL)
+		return 0;
+	return 1;
+}
+
+static int
+x86_64_read_u64_le(struct ztarget *tgt, zaddr_t addr, uint64_t *out)
+{
+	uint8_t b[8];
+	uint64_t v;
+	int i;
+
+	if (ztarget_read(tgt, addr, b, sizeof(b)) < 0)
+		return -1;
+	v = 0;
+	for (i = 0; i < 8; i++)
+		v |= (uint64_t)b[i] << (i * 8);
+	*out = v;
+	return 0;
+}
+
+static int
+x86_64_backtrace_fp(struct ztarget *target, const struct zregs *regs,
+    const struct zmap_table *maps, int max_frames,
+    void (*emit)(void *arg, int idx, zaddr_t addr), void *arg)
+{
+	const uint64_t frame_delta_max = 0x100000ULL; /* 1 MiB */
+	uint64_t rip;
+	uint64_t rbp;
+	int i;
+
+	if (target == NULL || regs == NULL || emit == NULL ||
+	    max_frames <= 0)
+		return -1;
+	rip = regs->rip;
+	rbp = regs->rbp;
+	emit(arg, 0, (zaddr_t)rip);
+
+	for (i = 1; i < max_frames; i++) {
+		uint64_t next_rbp = 0;
+		uint64_t retaddr = 0;
+
+		if (!x86_64_canon_user(rbp))
+			break;
+		if (x86_64_read_u64_le(target, (zaddr_t)rbp,
+		    &next_rbp) < 0)
+			break;
+		if (x86_64_read_u64_le(target, (zaddr_t)(rbp + 8),
+		    &retaddr) < 0)
+			break;
+		if (retaddr == 0)
+			break;
+		if (!x86_64_canon_user(retaddr))
+			break;
+		/* frame pointer must advance upward on x86-64 SysV */
+		if (next_rbp <= rbp)
+			break;
+		if (next_rbp - rbp > frame_delta_max)
+			break;
+		if (maps != NULL) {
+			const struct zmap *mr;
+			const struct zmap *mb;
+			mr = zmaps_find_by_addr(maps, (zaddr_t)retaddr);
+			mb = zmaps_find_by_addr(maps, (zaddr_t)next_rbp);
+			if (mr == NULL || mb == NULL)
+				break;
+			if (strchr(mr->perms, 'x') == NULL)
+				break;
+		}
+		emit(arg, i, (zaddr_t)retaddr);
+		rbp = next_rbp;
+		rip = retaddr;
+	}
+	return 0;
+}
+
 static const struct zarch_ops x86_64_ops = {
-	ZARCH_X86_64,
-	"x86-64",
-	x86_64_brk,
-	sizeof(x86_64_brk),
-	x86_64_decode_one,
-	x86_64_fallthrough,
-	x86_64_assemble_patch,
-	x86_64_invert_jcc,
-	x86_64_get_pc,
-	x86_64_set_pc,
-	x86_64_get_sp,
-	x86_64_get_fp,
-	"rip",
-	"rsp",
-	"rbp",
-	x86_64_breakpoint_pc_after_trap
+	.arch = ZARCH_X86_64,
+	.name = "x86-64",
+	.breakpoint_bytes = x86_64_brk,
+	.breakpoint_len = sizeof(x86_64_brk),
+	.decode_one = x86_64_decode_one,
+	.fallthrough = x86_64_fallthrough,
+	.assemble_one = x86_64_assemble_one,
+	.assemble_patch = x86_64_assemble_patch,
+	.invert_jcc = x86_64_invert_jcc,
+	.get_pc = x86_64_get_pc,
+	.set_pc = x86_64_set_pc,
+	.get_sp = x86_64_get_sp,
+	.get_fp = x86_64_get_fp,
+	.pc_reg_name = "rip",
+	.sp_reg_name = "rsp",
+	.fp_reg_name = "rbp",
+	.breakpoint_pc_after_trap = x86_64_breakpoint_pc_after_trap,
+	.regs_print = zregs_print,
+	.regs_get_by_name = zregs_get_by_name,
+	.regs_set_by_name = zregs_set_by_name,
+	.backtrace_fp = x86_64_backtrace_fp
 };
 
 const struct zarch_ops *

@@ -24,8 +24,6 @@
 #include "zdbg_exception.h"
 #include "zdbg_symbols.h"
 #include "zdbg_target.h"
-#include "zdbg_tinyasm.h"
-#include "zdbg_tinydis.h"
 #include "zdbg_patch.h"
 #include "zdbg_filter.h"
 #include "zdbg_actions.h"
@@ -165,6 +163,7 @@ print_help(void)
 	    "  sym [filter|-r]      list/search/refresh ELF symbols\n"
 	    "  addr expr            show address, nearest symbol, mapping\n"
 	    "  bt [count]           frame-pointer backtrace\n"
+	    "  arch                 show selected target architecture\n"
 	    "  g                    continue\n"
 	    "  t                    single step\n"
 	    "  p                    proceed / step over direct call\n"
@@ -477,15 +476,26 @@ asm_resolve(void *arg, const char *expr, zaddr_t *out)
 static int
 cmd_r(struct zdbg *d, struct toks *t)
 {
+	const struct zarch_ops *a = d->arch;
+
+	if (a == NULL) {
+		printf("no architecture selected\n");
+		return -1;
+	}
 	if (t->n == 1) {
 		refresh_regs(d);
-		zregs_print(&d->regs);
+		if (a->regs_print != NULL)
+			a->regs_print(&d->regs);
+		else
+			printf("registers unsupported for architecture %s\n",
+			    a->name ? a->name : "(none)");
 		return 0;
 	}
 	if (t->n == 2) {
 		uint64_t v = 0;
 		refresh_regs(d);
-		if (zregs_get_by_name(&d->regs, t->v[1], &v) < 0) {
+		if (a->regs_get_by_name == NULL ||
+		    a->regs_get_by_name(&d->regs, t->v[1], &v) < 0) {
 			printf("unknown register: %s\n", t->v[1]);
 			return -1;
 		}
@@ -502,7 +512,8 @@ cmd_r(struct zdbg *d, struct toks *t)
 			printf("bad value\n");
 			return -1;
 		}
-		if (zregs_set_by_name(&d->regs, t->v[1], v) < 0) {
+		if (a->regs_set_by_name == NULL ||
+		    a->regs_set_by_name(&d->regs, t->v[1], v) < 0) {
 			printf("unknown register: %s\n", t->v[1]);
 			return -1;
 		}
@@ -1853,10 +1864,16 @@ cmd_a(struct zdbg *d, struct toks *t)
 		refresh_maps(d);
 		refresh_syms(d);
 	}
+	if (d->arch == NULL || d->arch->assemble_one == NULL) {
+		printf("assembly not supported for architecture %s\n",
+		    (d->arch && d->arch->name) ? d->arch->name : "(none)");
+		return -1;
+	}
 	printf("assemble at %016llx (empty line ends)\n",
 	    (unsigned long long)addr);
 	for (;;) {
-		struct ztinyasm enc;
+		uint8_t enc[ZDBG_MAX_INSN_BYTES];
+		size_t enc_len = 0;
 		char err[128];
 		size_t i;
 		printf("%016llx- ", (unsigned long long)addr);
@@ -1871,22 +1888,23 @@ cmd_a(struct zdbg *d, struct toks *t)
 		}
 		if (line[0] == 0)
 			break;
-		if (ztinyasm_assemble_ex(addr, line, &enc, asm_resolve, d,
-		    err, sizeof(err)) < 0) {
+		err[0] = 0;
+		if (d->arch->assemble_one(addr, line, enc, sizeof(enc),
+		    &enc_len, asm_resolve, d, err, sizeof(err)) < 0) {
 			printf("%s\n", err[0] ? err : "bad instruction");
 			continue;
 		}
 		printf("   ");
-		for (i = 0; i < enc.len; i++)
-			printf("%02x ", enc.code[i]);
+		for (i = 0; i < enc_len; i++)
+			printf("%02x ", enc[i]);
 		printf("\n");
 		if (have_target(d)) {
-			if (zdbg_patch_write(d, addr, enc.code, enc.len,
+			if (zdbg_patch_write(d, addr, enc, enc_len,
 			    "a") < 0) {
 				/* message already printed */
 			}
 		}
-		addr += enc.len;
+		addr += enc_len;
 	}
 	d->asm_addr = addr;
 	return 0;
@@ -1898,7 +1916,7 @@ cmd_pa(struct zdbg *d, struct toks *t)
 {
 	zaddr_t addr;
 	uint64_t len;
-	uint8_t buf[ZDBG_TINYASM_MAX];
+	uint8_t buf[ZDBG_MAX_INSN_BYTES];
 	size_t out_len = 0;
 
 	if (t->n < 4) {
@@ -4083,41 +4101,6 @@ cmd_addr(struct zdbg *d, struct toks *t)
 
 /* --- bt -------------------------------------------------------- */
 
-/*
- * Conservative x86-64 user-space canonical check.  Strict
- * canonical rules require bits 63..47 of the address to all
- * match (sign extension of bit 47); for a frame-pointer walker
- * we care about user addresses only, which live in the lower
- * half [0x0000000000001000, 0x0000800000000000).  Rejecting
- * kernel-half and non-canonical values here also rejects zero
- * and the first page.
- */
-static int
-is_canonical_user_addr(uint64_t a)
-{
-	if (a < 0x1000)
-		return 0;
-	if (a >= 0x0000800000000000ULL)
-		return 0;
-	return 1;
-}
-
-static int
-read_u64_le(struct ztarget *tgt, zaddr_t addr, uint64_t *out)
-{
-	uint8_t b[8];
-	uint64_t v;
-	int i;
-
-	if (ztarget_read(tgt, addr, b, sizeof(b)) < 0)
-		return -1;
-	v = 0;
-	for (i = 0; i < 8; i++)
-		v |= (uint64_t)b[i] << (i * 8);
-	*out = v;
-	return 0;
-}
-
 static void
 print_bt_frame(struct zdbg *d, int idx, zaddr_t rip)
 {
@@ -4126,17 +4109,24 @@ print_bt_frame(struct zdbg *d, int idx, zaddr_t rip)
 	printf("#%-2d %016llx%s\n", idx, (unsigned long long)rip, ann);
 }
 
+static void
+bt_emit(void *arg, int idx, zaddr_t addr)
+{
+	print_bt_frame((struct zdbg *)arg, idx, addr);
+}
+
 static int
 cmd_bt(struct zdbg *d, struct toks *t)
 {
 	uint64_t count = 16;
-	uint64_t frame_delta_max = 0x100000ULL;	/* 1 MiB */
-	zaddr_t rip;
-	zaddr_t rbp;
-	uint64_t i;
 
 	if (!have_target(d) || !target_stopped(d)) {
 		printf("no target\n");
+		return -1;
+	}
+	if (d->arch == NULL || d->arch->backtrace_fp == NULL) {
+		printf("backtrace not supported for architecture %s\n",
+		    (d->arch && d->arch->name) ? d->arch->name : "(none)");
 		return -1;
 	}
 	refresh_regs(d);
@@ -4153,48 +4143,29 @@ cmd_bt(struct zdbg *d, struct toks *t)
 	}
 	if (have_target(d) && !d->have_maps)
 		refresh_maps(d);
+	if (count > 0x7fffffff)
+		count = 0x7fffffff;
+	return d->arch->backtrace_fp(&d->target, &d->regs,
+	    d->have_maps ? &d->maps : NULL, (int)count, bt_emit, d);
+}
 
-	rip = d->regs.rip;
-	rbp = d->regs.rbp;
+/* --- arch ------------------------------------------------------ */
+static int
+cmd_arch(struct zdbg *d, struct toks *t)
+{
+	const struct zarch_ops *a = d->arch;
 
-	/* frame 0 is always the current rip */
-	print_bt_frame(d, 0, rip);
-
-	for (i = 1; i < count; i++) {
-		uint64_t next_rbp = 0;
-		uint64_t retaddr = 0;
-
-		if (!is_canonical_user_addr(rbp))
-			break;
-		if (read_u64_le(&d->target, rbp, &next_rbp) < 0)
-			break;
-		if (read_u64_le(&d->target, rbp + 8, &retaddr) < 0)
-			break;
-		if (retaddr == 0)
-			break;
-		if (!is_canonical_user_addr(retaddr))
-			break;
-		/* frame pointer must advance upward on x86-64 SysV */
-		if (next_rbp <= rbp)
-			break;
-		if (next_rbp - rbp > frame_delta_max)
-			break;
-		/* if we have a map table, require retaddr to be executable
-		 * and next_rbp to live in some mapping */
-		if (d->have_maps) {
-			const struct zmap *mr;
-			const struct zmap *mb;
-			mr = zmaps_find_by_addr(&d->maps, retaddr);
-			mb = zmaps_find_by_addr(&d->maps, next_rbp);
-			if (mr == NULL || mb == NULL)
-				break;
-			if (strchr(mr->perms, 'x') == NULL)
-				break;
-		}
-		print_bt_frame(d, (int)i, retaddr);
-		rbp = next_rbp;
-		rip = retaddr;
+	(void)t;
+	if (a == NULL || a->name == NULL) {
+		printf("arch: (none)\n");
+		return 0;
 	}
+	if (a->arch == ZARCH_AARCH64) {
+		printf("arch: %s (stub; decode/assembly/registers"
+		    " unsupported)\n", a->name);
+		return 0;
+	}
+	printf("arch: %s\n", a->name);
 	return 0;
 }
 
@@ -5543,6 +5514,21 @@ check_thread(struct zdbg *d, const char *tok)
 }
 
 static int
+check_arch(struct zdbg *d, const char *want)
+{
+	const char *got;
+
+	if (want == NULL || *want == 0)
+		return check_fail("usage: %s arch NAME", check_word);
+	if (d->arch == NULL || d->arch->name == NULL)
+		return check_fail("no architecture selected");
+	got = d->arch->name;
+	if (strcmp(got, want) != 0)
+		return check_fail("arch expected %s, got %s", want, got);
+	return 0;
+}
+
+static int
 check_reg(struct zdbg *d, const char *name, const char *expr)
 {
 	uint64_t got = 0;
@@ -5553,7 +5539,8 @@ check_reg(struct zdbg *d, const char *name, const char *expr)
 	if (!target_stopped(d))
 		return check_fail("target not stopped");
 	refresh_regs(d);
-	if (zregs_get_by_name(&d->regs, name, &got) < 0)
+	if (d->arch == NULL || d->arch->regs_get_by_name == NULL ||
+	    d->arch->regs_get_by_name(&d->regs, name, &got) < 0)
 		return check_fail("unknown register: %s", name);
 	if (eval_addr(d, expr, &want) < 0) {
 		uint64_t v;
@@ -6166,6 +6153,8 @@ cmd_check(struct zdbg *d, struct toks *t)
 	}
 	if (strcmp(sub, "thread") == 0)
 		return check_thread(d, argc >= 2 ? argv[1] : NULL);
+	if (strcmp(sub, "arch") == 0)
+		return check_arch(d, argc >= 2 ? argv[1] : NULL);
 	if (strcmp(sub, "reg") == 0) {
 		if (argc < 3)
 			return check_fail(
@@ -6486,16 +6475,6 @@ zdbg_init(struct zdbg *d)
 		return;
 	memset(d, 0, sizeof(*d));
 	ztarget_init(&d->target);
-	/*
-	 * Both currently supported OS backends (Linux ptrace and
-	 * the Windows Debug API) only run x86-64 targets.  Hard
-	 * coding the architecture here is acceptable; it is
-	 * centralized so a future ELF e_machine / PE Machine
-	 * detection has one place to plug in.
-	 */
-	d->arch_id = ZARCH_X86_64;
-	d->arch = zarch_get(d->arch_id);
-	zbp_table_init(&d->bps, d->arch);
 	zhwbp_table_init(&d->hwbps);
 	zregs_clear(&d->regs);
 	zmaps_init(&d->maps);
@@ -6505,6 +6484,15 @@ zdbg_init(struct zdbg *d)
 	zexc_table_init(&d->excs);
 	zpatch_table_init(&d->patches);
 	zstdio_config_init(&d->stdio);
+	/*
+	 * Pick the target architecture for the active backend.
+	 * Today both supported OS backends (Linux ptrace and the
+	 * Windows Debug API) only run x86-64 targets; the central
+	 * setter is in arch.c so a future ELF/PE machine-detection
+	 * step has one place to plug in.  zdbg_select_arch_for_target
+	 * also initializes d->bps with the resolved arch ops.
+	 */
+	zdbg_select_arch_for_target(d);
 	d->dump_addr = 0;
 	d->asm_addr = 0;
 	d->have_regs = 0;
@@ -6680,6 +6668,8 @@ zcmd_exec(struct zdbg *d, const char *line)
 		return cmd_addr(d, &t);
 	if (strcmp(mn, "bt") == 0)
 		return cmd_bt(d, &t);
+	if (strcmp(mn, "arch") == 0)
+		return cmd_arch(d, &t);
 	if (strcmp(mn, "th") == 0)
 		return cmd_th(d, &t);
 	if (strcmp(mn, "sig") == 0)

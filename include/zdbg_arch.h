@@ -23,6 +23,10 @@
 #include "zdbg.h"
 
 struct zregs;
+struct zdbg;
+struct zsym_table;
+struct ztarget;
+struct zmap_table;
 
 enum zarch {
 	ZARCH_NONE = 0,
@@ -114,6 +118,18 @@ struct zarch_ops {
 	zaddr_t (*fallthrough)(const struct zdecode *d);
 
 	/*
+	 * Encode a single source line at `addr` into `buf`.  Unlike
+	 * `assemble_patch` this does NOT NOP-fill: only the encoded
+	 * bytes are written and `*lenp` reports the actual length.
+	 * Used by interactive `a`.  Returns 0 on success, -1 on
+	 * error (a short diagnostic is written to `err`).
+	 */
+	int (*assemble_one)(zaddr_t addr, const char *line,
+	    uint8_t *buf, size_t buflen, size_t *lenp,
+	    zarch_resolve_fn resolve, void *resolve_arg,
+	    char *err, size_t errcap);
+
+	/*
 	 * Encode a single source line into a fixed-size patch slot
 	 * starting at `addr`.  Behaves like ztinyasm_patch_ex():
 	 * pads any unused tail with the architecture's NOP, fails
@@ -153,6 +169,35 @@ struct zarch_ops {
 	 * already reports BRK at the BRK PC, so this is `pc`.
 	 */
 	zaddr_t (*breakpoint_pc_after_trap)(zaddr_t pc);
+
+	/*
+	 * Generic register operations.  These wrap the current
+	 * `struct zregs` helpers so command code does not call
+	 * x86-only register routines directly.  `regs_print` may
+	 * print an "unsupported" line; `regs_get_by_name` /
+	 * `regs_set_by_name` return -1 if `name` is unknown or the
+	 * architecture has no register file backing.
+	 */
+	void (*regs_print)(const struct zregs *regs);
+	int  (*regs_get_by_name)(const struct zregs *regs,
+	    const char *name, uint64_t *vp);
+	int  (*regs_set_by_name)(struct zregs *regs,
+	    const char *name, uint64_t v);
+
+	/*
+	 * Frame-pointer backtrace.  When non-NULL, walks at most
+	 * `max_frames` frames starting from the architecture's PC
+	 * and FP in `regs`, calling `emit(arg, idx, addr)` once per
+	 * frame.  Returns 0 on success, -1 on architecture errors.
+	 * `target` and `maps` are used to read frame slots and
+	 * sanity-check candidate return addresses.
+	 */
+	int (*backtrace_fp)(struct ztarget *target,
+	    const struct zregs *regs,
+	    const struct zmap_table *maps,
+	    int max_frames,
+	    void (*emit)(void *arg, int idx, zaddr_t addr),
+	    void *arg);
 };
 
 /* Returns the ops table for `arch`, or NULL for ZARCH_NONE / an
@@ -162,5 +207,22 @@ const struct zarch_ops *zarch_get(enum zarch arch);
 /* Convenience accessors for the two known architectures. */
 const struct zarch_ops *zarch_x86_64(void);
 const struct zarch_ops *zarch_aarch64(void);
+
+/*
+ * Central architecture setter.  Stores `arch` in `d->arch_id`,
+ * looks up the ops table, and reinitializes the breakpoint table
+ * with the new arch ops.  Returns 0 on success, -1 if `arch` has
+ * no ops registered.  Use this rather than poking `d->arch_id`
+ * directly so a future ELF/PE machine-detection step has one
+ * place to plug in.
+ */
+int zdbg_set_arch(struct zdbg *d, enum zarch arch);
+
+/*
+ * Pick the target architecture for the current backend.  Today
+ * both supported OS backends are x86-64-only, so this always
+ * selects ZARCH_X86_64.  Returns 0 on success, -1 on error.
+ */
+int zdbg_select_arch_for_target(struct zdbg *d);
 
 #endif /* ZDBG_ARCH_H */

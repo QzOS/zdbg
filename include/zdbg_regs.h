@@ -1,5 +1,13 @@
 /*
- * zdbg_regs.h - portable x86-64 register snapshot.
+ * zdbg_regs.h - current x86-64 register snapshot used by the
+ * existing OS backends.
+ *
+ * This struct is intentionally still x86-64-shaped after the
+ * first arch split.  Generic code should use zarch_ops for
+ * PC/SP/FP and command-level register operations (regs_print,
+ * regs_get_by_name, regs_set_by_name) where possible.  A future
+ * issue will introduce a true architecture-specific register
+ * file.
  */
 
 #ifndef ZDBG_REGS_H

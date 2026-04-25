@@ -187,6 +187,24 @@ test_assert_alias(void)
 	return 0;
 }
 
+static int
+test_arch_command(void)
+{
+	struct zdbg d;
+
+	zdbg_init(&d);
+	d.quiet = 1;
+	/* `arch` is informational and always succeeds. */
+	CHECK(zcmd_exec(&d, "arch") == 0);
+	/* default is x86-64 */
+	CHECK(zcmd_exec(&d, "check arch x86-64") == 0);
+	CHECK(zcmd_exec(&d, "assert arch x86-64") == 0);
+	CHECK(zcmd_exec(&d, "check arch aarch64") == -1);
+	CHECK(zcmd_exec(&d, "check arch") == -1);
+	zdbg_fini(&d);
+	return 0;
+}
+
 int
 main(void)
 {
@@ -200,6 +218,7 @@ main(void)
 	fails += test_last_stop_tracking();
 	fails += test_symbol_numeric_rejected();
 	fails += test_assert_alias();
+	fails += test_arch_command();
 
 	if (fails == 0) {
 		printf("test_check ok\n");

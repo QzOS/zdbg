@@ -275,6 +275,8 @@ REPL keeps running.
                                      signal|exception|exit|hwbp|
                                      watchpoint|error)
     check thread [tid|current]      selected thread matches
+    check arch NAME                 target architecture name matches
+                                    (e.g. `check arch x86-64`)
     check reg name value            register equals expression
     check rip expr                  alias for `check reg rip expr`
     check mem addr pattern          memory bytes/string/value match
@@ -425,6 +427,7 @@ is implemented.
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
     addr expr            show address, nearest symbol, containing map
     bt [count]           frame-pointer backtrace (default 16 frames)
+    arch                 show selected target architecture
     g                    continue (waits for next stop)
     t                    single step (waits for next stop)
     p [count]            proceed / step over direct call
@@ -726,23 +729,36 @@ zdbg separates two axes:
   Windows Debug API.
 * **Target architecture** — owns instruction decoding, tiny patch
   assembly, software-breakpoint instruction bytes and length,
-  software-breakpoint PC correction after a trap, and abstract
-  PC/SP/FP register access through `struct zarch_ops`.  x86-64 is
-  currently the only implemented target architecture.  AArch64
-  has a stub architecture entry only (BRK #0 bytes for software
-  breakpoints, no decode/assembly); no AArch64 backend is wired
-  up yet.
+  software-breakpoint PC correction after a trap, abstract PC/SP/FP
+  register access, command-level register print/get/set, and
+  frame-pointer backtrace through `struct zarch_ops`.  x86-64 is
+  currently the only implemented target architecture.  AArch64 has
+  a stub ops table but no working backend, register file, decode,
+  or assembly yet; the stub fails cleanly with messages like
+  "assembly not supported for architecture aarch64".
 
 Generic command, run-control and breakpoint code reaches for
 architecture-specific behavior only through the ops table on
-`struct zdbg::arch`.  The x86-only tinyasm/tinydis modules remain
-as the implementation behind the x86-64 ops table.
+`struct zdbg::arch`.  `cmd.c` no longer includes `zdbg_tinyasm.h`
+or `zdbg_tinydis.h` — interactive `a`, `pa`, `ij`, `u`, `p`,
+register print/get/set, and `bt` all dispatch through arch hooks.
+The x86-only tinyasm/tinydis modules remain as the implementation
+behind the x86-64 ops table.
+
+The architecture is selected through `zdbg_select_arch_for_target()`
+(today always x86-64 because both backends are x86-64-only) and
+mutated via `zdbg_set_arch()`, which keeps `d->arch_id`, `d->arch`,
+and the breakpoint table in sync.  A future ELF e_machine / PE
+Machine detection step plugs in there.
 
 Register storage is still x86-64-shaped in this pass: `struct
 zregs` is laid out for x86-64 and the architecture ops expose
-PC/SP/FP through abstract accessors that map to rip/rsp/rbp.  A
-full architecture-specific register file is future work and would
-arrive together with a real AArch64 backend.
+PC/SP/FP through abstract accessors that map to rip/rsp/rbp.
+Commands route basic register operations through architecture
+hooks, but expression register names still follow the current
+x86-64 register set until the future register-file refactor.  A
+real architecture-specific register file would arrive together
+with a real AArch64 backend.
 
     include/        public headers
     src/            core implementation
