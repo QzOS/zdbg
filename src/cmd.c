@@ -1758,14 +1758,13 @@ cmd_rf(struct zdbg *d, struct toks *t)
 /* --- u --------------------------------------------------------- */
 
 /*
- * Print a decoded instruction with the same layout as
- * ztinydis_print() and, when the instruction has a direct
- * target and symbols are loaded, append ` <symbol+off>`.  The
- * core tinydis decoder stays symbol-free; symbolisation is
- * applied only at print time.
+ * Print a decoded instruction with the same layout as the legacy
+ * x86 disassembler and, when the instruction has a direct target
+ * and symbols are loaded, append ` <symbol+off>`.  The decoder
+ * stays symbol-free; symbolisation is applied only at print time.
  */
 static void
-print_disasm_line(struct zdbg *d, const struct ztinydis *dis)
+print_disasm_line(struct zdbg *d, const struct zdecode *dis)
 {
 	char hex[64];
 	char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
@@ -1813,14 +1812,20 @@ cmd_u(struct zdbg *d, struct toks *t)
 		printf("target operation not available in this backend yet\n");
 		return -1;
 	}
+	if (d->arch == NULL || d->arch->decode_one == NULL) {
+		printf("disassembly not supported for architecture\n");
+		return -1;
+	}
 	{
 		size_t off = 0;
 		for (i = 0; i < count; i++) {
-			struct ztinydis dis;
+			struct zdecode dis;
 			if (off >= sizeof(buf))
 				break;
-			if (ztinydis_one(addr, buf + off, sizeof(buf) - off,
-			    &dis) < 0)
+			if (d->arch->decode_one(addr, buf + off,
+			    sizeof(buf) - off, &dis) < 0)
+				break;
+			if (dis.len == 0)
 				break;
 			print_disasm_line(d, &dis);
 			addr += dis.len;
@@ -1913,9 +1918,14 @@ cmd_pa(struct zdbg *d, struct toks *t)
 		refresh_maps(d);
 		refresh_syms(d);
 	}
+	if (d->arch == NULL || d->arch->assemble_patch == NULL) {
+		printf("patch assembly not supported for architecture\n");
+		return -1;
+	}
 	{
 		char err[128];
-		if (ztinyasm_patch_ex(addr, (size_t)len,
+		err[0] = 0;
+		if (d->arch->assemble_patch(addr, (size_t)len,
 		    rest_from(t->orig, 3), buf, sizeof(buf), &out_len,
 		    asm_resolve, d, err, sizeof(err)) < 0) {
 			printf("%s\n", err[0] ? err : "assemble failed");
@@ -1955,7 +1965,12 @@ cmd_ij(struct zdbg *d, struct toks *t)
 		printf("target operation not available in this backend yet\n");
 		return -1;
 	}
-	if (zpatch_invert_jcc(buf, sizeof(buf), &used) < 0) {
+	if (d->arch == NULL || d->arch->invert_jcc == NULL) {
+		printf("ij not supported for architecture %s\n",
+		    (d->arch && d->arch->name) ? d->arch->name : "(none)");
+		return -1;
+	}
+	if (d->arch->invert_jcc(buf, sizeof(buf), &used) < 0) {
 		printf("no jz/jnz at %016llx\n", (unsigned long long)addr);
 		return -1;
 	}
@@ -2063,9 +2078,9 @@ cmd_be(struct zdbg *d, struct toks *t)
 	/*
 	 * If we are currently stopped exactly at this breakpoint's
 	 * address waiting to execute the original instruction, do
-	 * not reinstall 0xcc here: the resume-from-bp path will do
-	 * that after the internal single-step.  Leave it logically
-	 * enabled and uninstalled.
+	 * not reinstall the architecture's breakpoint bytes here:
+	 * the resume-from-bp path will do that after the internal
+	 * single-step.  Leave it logically enabled and uninstalled.
 	 */
 	if (d->stopped_bp == id) {
 		b->state = ZBP_ENABLED;
@@ -3574,7 +3589,8 @@ static int
 cmd_p_once(struct zdbg *d)
 {
 	uint8_t ibuf[16];
-	struct ztinydis dis;
+	struct zdecode dis;
+	zaddr_t pc;
 	zaddr_t fallthrough;
 	int temp_id = -1;
 	int preexisting_id;
@@ -3591,23 +3607,33 @@ cmd_p_once(struct zdbg *d)
 		printf("no registers\n");
 		return -1;
 	}
+	if (d->arch == NULL || d->arch->decode_one == NULL ||
+	    d->arch->fallthrough == NULL || d->arch->get_pc == NULL) {
+		/* Architecture cannot reason about step-over: fall back
+		 * to plain single-step. */
+		return cmd_run_and_wait(d, 1);
+	}
+	if (d->arch->get_pc(&d->regs, &pc) < 0)
+		return cmd_run_and_wait(d, 1);
 
-	if (ztarget_read(&d->target, d->regs.rip, ibuf, sizeof(ibuf)) < 0) {
+	if (ztarget_read(&d->target, pc, ibuf, sizeof(ibuf)) < 0) {
 		printf("target operation not available in this backend yet\n");
 		return -1;
 	}
-	if (ztinydis_one(d->regs.rip, ibuf, sizeof(ibuf), &dis) < 0 ||
+	if (d->arch->decode_one(pc, ibuf, sizeof(ibuf), &dis) < 0 ||
 	    dis.len == 0) {
 		return cmd_run_and_wait(d, 1);
 	}
 
-	/* Only step over direct call rel32; everything else is plain
+	/* Only step over direct calls; everything else is plain
 	 * single-step (which goes through the usual bp rearm path). */
 	if (!(dis.kind == ZINSN_CALL && dis.is_call && dis.has_target)) {
 		return cmd_run_and_wait(d, 1);
 	}
 
-	fallthrough = ztinydis_fallthrough(&dis);
+	fallthrough = d->arch->fallthrough(&dis);
+	if (fallthrough == 0)
+		return cmd_run_and_wait(d, 1);
 
 	/* If a breakpoint already exists at fallthrough we can reuse
 	 * it as-is (it is either installed and will fire, or disabled
@@ -3684,14 +3710,22 @@ cmd_p_once(struct zdbg *d)
 			    restore_perm_bp);
 	}
 
-	if (st.reason == ZSTOP_BREAKPOINT && target_stopped(d) &&
-	    d->have_regs && d->regs.rip == fallthrough) {
-		char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
-		annot_addr(d, fallthrough, ann, sizeof(ann));
-		printf("stopped: proceed rip=%016llx%s\n",
-		    (unsigned long long)fallthrough, ann);
-	} else {
-		zstop_print(d, &st, bp_id);
+	{
+		zaddr_t cur_pc = 0;
+		int at_fallthrough = 0;
+		if (st.reason == ZSTOP_BREAKPOINT && target_stopped(d) &&
+		    d->have_regs &&
+		    d->arch->get_pc(&d->regs, &cur_pc) == 0 &&
+		    cur_pc == fallthrough)
+			at_fallthrough = 1;
+		if (at_fallthrough) {
+			char ann[ZDBG_SYM_NAME_MAX + ZDBG_SYM_MODULE_MAX + 48];
+			annot_addr(d, fallthrough, ann, sizeof(ann));
+			printf("stopped: proceed rip=%016llx%s\n",
+			    (unsigned long long)fallthrough, ann);
+		} else {
+			zstop_print(d, &st, bp_id);
+		}
 	}
 	return 0;
 }
@@ -6450,7 +6484,16 @@ zdbg_init(struct zdbg *d)
 		return;
 	memset(d, 0, sizeof(*d));
 	ztarget_init(&d->target);
-	zbp_table_init(&d->bps);
+	/*
+	 * Both currently supported OS backends (Linux ptrace and
+	 * the Windows Debug API) only run x86-64 targets.  Hard
+	 * coding the architecture here is acceptable; it is
+	 * centralized so a future ELF e_machine / PE Machine
+	 * detection has one place to plug in.
+	 */
+	d->arch_id = ZARCH_X86_64;
+	d->arch = zarch_get(d->arch_id);
+	zbp_table_init(&d->bps, d->arch);
 	zhwbp_table_init(&d->hwbps);
 	zregs_clear(&d->regs);
 	zmaps_init(&d->maps);

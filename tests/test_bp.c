@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "zdbg_arch.h"
 #include "zdbg_bp.h"
 #include "zdbg_target.h"
 
@@ -22,7 +23,7 @@ test_alloc_defaults(void)
 	struct zbp_table bt;
 	int id;
 
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	id = zbp_alloc(&bt, 0x400000, 0);
 	CHECK(id == 0);
 	CHECK(bt.bp[id].state == ZBP_DISABLED);
@@ -38,7 +39,7 @@ test_alloc_reuses_same_addr(void)
 	struct zbp_table bt;
 	int a, b;
 
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	a = zbp_alloc(&bt, 0x401000, 0);
 	b = zbp_alloc(&bt, 0x401000, 1);
 	CHECK(a == b);
@@ -51,7 +52,7 @@ test_find_by_addr(void)
 	struct zbp_table bt;
 	int id;
 
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	CHECK(zbp_find_by_addr(&bt, 0x401000) < 0);
 	id = zbp_alloc(&bt, 0x401000, 0);
 	CHECK(zbp_find_by_addr(&bt, 0x401000) == id);
@@ -74,7 +75,7 @@ test_clear_uninstalled_does_not_touch_target(void)
 	 * without touching the target at all.
 	 */
 	memset(&dummy, 0, sizeof(dummy));
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	id = zbp_alloc(&bt, 0x401000, 0);
 	CHECK(bt.bp[id].installed == 0);
 	CHECK(zbp_clear(&dummy, &bt, id) == 0);
@@ -90,7 +91,7 @@ test_install_requires_enabled(void)
 	int id;
 
 	memset(&dummy, 0, sizeof(dummy));
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	id = zbp_alloc(&bt, 0x401000, 0);
 	/* state is ZBP_DISABLED, install must refuse */
 	CHECK(zbp_install(&dummy, &bt, id) < 0);
@@ -108,7 +109,7 @@ test_handle_trap_ignores_zero_rip(void)
 
 	memset(&dummy, 0, sizeof(dummy));
 	memset(&regs, 0, sizeof(regs));
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	regs.rip = 0;
 	CHECK(zbp_handle_trap(&dummy, &bt, &regs, &id) == 0);
 	CHECK(id == -1);
@@ -125,7 +126,7 @@ test_handle_trap_no_match(void)
 
 	memset(&dummy, 0, sizeof(dummy));
 	memset(&regs, 0, sizeof(regs));
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	regs.rip = 0x401234;
 	CHECK(zbp_handle_trap(&dummy, &bt, &regs, &id) == 0);
 	CHECK(id == -1);
@@ -143,7 +144,7 @@ test_handle_trap_ignores_uninstalled_match(void)
 
 	memset(&dummy, 0, sizeof(dummy));
 	memset(&regs, 0, sizeof(regs));
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	a = zbp_alloc(&bt, 0x401233, 0);
 	/* logically enabled but not installed: must not claim trap */
 	bt.bp[a].state = ZBP_ENABLED;
@@ -160,7 +161,7 @@ test_list_handles_enabled_and_installed_separately(void)
 	struct zbp_table bt;
 	int a, b;
 
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 	a = zbp_alloc(&bt, 0x401000, 0);
 	b = zbp_alloc(&bt, 0x402000, 0);
 	bt.bp[a].state = ZBP_ENABLED;
@@ -171,6 +172,26 @@ test_list_handles_enabled_and_installed_separately(void)
 	CHECK(bt.bp[b].state == ZBP_ENABLED && bt.bp[b].installed == 0);
 	/* smoke: must not crash */
 	zbp_list(&bt);
+	return 0;
+}
+
+static int
+test_alloc_resets_orig_storage(void)
+{
+	struct zbp_table bt;
+	int id;
+
+	zbp_table_init(&bt, zarch_x86_64());
+	id = zbp_alloc(&bt, 0x400000, 0);
+	CHECK(id >= 0);
+	/* Newly allocated slots must not claim any saved original
+	 * bytes; orig_len stays zero until install() records them. */
+	CHECK(bt.bp[id].orig_len == 0);
+	{
+		size_t k;
+		for (k = 0; k < sizeof(bt.bp[id].orig); k++)
+			CHECK(bt.bp[id].orig[k] == 0);
+	}
 	return 0;
 }
 
@@ -186,6 +207,7 @@ main(void)
 	if (test_handle_trap_no_match()) return 1;
 	if (test_handle_trap_ignores_uninstalled_match()) return 1;
 	if (test_list_handles_enabled_and_installed_separately()) return 1;
+	if (test_alloc_resets_orig_storage()) return 1;
 	printf("OK\n");
 	return 0;
 }

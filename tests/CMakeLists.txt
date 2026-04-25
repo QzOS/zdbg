@@ -2,6 +2,10 @@ add_executable(test_expr test_expr.c)
 target_link_libraries(test_expr PRIVATE zdbg_core)
 add_test(NAME test_expr COMMAND test_expr)
 
+add_executable(test_arch test_arch.c)
+target_link_libraries(test_arch PRIVATE zdbg_core)
+add_test(NAME test_arch COMMAND test_arch)
+
 add_executable(test_tinyasm test_tinyasm.c)
 target_link_libraries(test_tinyasm PRIVATE zdbg_core)
 add_test(NAME test_tinyasm COMMAND test_tinyasm)

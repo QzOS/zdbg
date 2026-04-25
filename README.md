@@ -718,8 +718,37 @@ Typical session:
 
 ## Architecture overview
 
+zdbg separates two axes:
+
+* **OS backend** — owns process control, wait/stop handling, memory
+  access, thread enumeration, and OS-specific signal/exception
+  mechanics.  The supported backends are Linux ptrace and the
+  Windows Debug API.
+* **Target architecture** — owns instruction decoding, tiny patch
+  assembly, software-breakpoint instruction bytes and length,
+  software-breakpoint PC correction after a trap, and abstract
+  PC/SP/FP register access through `struct zarch_ops`.  x86-64 is
+  currently the only implemented target architecture.  AArch64
+  has a stub architecture entry only (BRK #0 bytes for software
+  breakpoints, no decode/assembly); no AArch64 backend is wired
+  up yet.
+
+Generic command, run-control and breakpoint code reaches for
+architecture-specific behavior only through the ops table on
+`struct zdbg::arch`.  The x86-only tinyasm/tinydis modules remain
+as the implementation behind the x86-64 ops table.
+
+Register storage is still x86-64-shaped in this pass: `struct
+zregs` is laid out for x86-64 and the architecture ops expose
+PC/SP/FP through abstract accessors that map to rip/rsp/rbp.  A
+full architecture-specific register file is future work and would
+arrive together with a real AArch64 backend.
+
     include/        public headers
     src/            core implementation
+        arch.c          architecture ops registry
+        arch_x86_64.c   x86-64 ops (wraps tinyasm/tinydis)
+        arch_aarch64.c  AArch64 stub ops
         target.c        OS-agnostic dispatcher
         target_null.c   fallback backend (non-Linux, errors cleanly)
         os_linux/       Linux ptrace backend (real)

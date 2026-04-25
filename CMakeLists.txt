@@ -14,6 +14,9 @@ endif()
 
 # Core library: every module except main.c.
 set(ZDBG_CORE_SOURCES
+    src/arch.c
+    src/arch_x86_64.c
+    src/arch_aarch64.c
     src/regs.c
     src/mem.c
     src/expr.c

@@ -1,24 +1,24 @@
 /*
  * zdbg_bp.h - software breakpoint table.
  *
- * On x86-64 int3 trap, RIP points after the CC byte.
- * A real breakpoint handler must check RIP - 1.
- * To continue from a software breakpoint:
- *     restore original byte
- *     set RIP back to breakpoint address
- *     single-step one instruction
- *     reinsert CC
- *     continue
+ * Software-breakpoint instruction bytes, length and post-trap PC
+ * correction are owned by the architecture ops table referenced
+ * from struct zbp_table::arch.  This module no longer hard-codes
+ * x86-64 0xcc / RIP - 1 assumptions.
  *
- * This full sequence is deliberately not implemented in the
- * initial framework issue.  It is documented here so later
- * issues preserve the intent.
+ * To continue from a software breakpoint:
+ *     restore the original bytes recorded in zbp::orig
+ *     set the architecture's PC back to the breakpoint address
+ *     single-step one instruction
+ *     reinstall the architecture's breakpoint bytes
+ *     continue
  */
 
 #ifndef ZDBG_BP_H
 #define ZDBG_BP_H
 
 #include "zdbg.h"
+#include "zdbg_arch.h"
 #include "zdbg_target.h"
 #include "zdbg_filter.h"
 #include "zdbg_actions.h"
@@ -38,17 +38,23 @@ enum zbp_state {
  *     b/be/bd/bc commands.  A ZBP_ENABLED breakpoint should fire
  *     whenever the target reaches its address.
  *
- *   - installed flag: whether an int3 byte is currently present
- *     in target memory at that address.  When a breakpoint is
- *     hit, the debugger restores the original byte, sets RIP
- *     back, and leaves the breakpoint logically enabled but
- *     uninstalled until the instruction has been stepped over.
+ *   - installed flag: whether the architecture's breakpoint bytes
+ *     are currently present in target memory at that address.
+ *     When a breakpoint is hit, the debugger restores the original
+ *     bytes, sets the PC back, and leaves the breakpoint logically
+ *     enabled but uninstalled until the instruction has been
+ *     stepped over.
+ *
+ * `orig` stores the original instruction bytes that were
+ * overwritten by install.  `orig_len` records how many bytes were
+ * saved (always equal to arch->breakpoint_len at install time).
  */
 
 struct zbp {
 	enum zbp_state state;
 	zaddr_t addr;
-	uint8_t orig;
+	uint8_t orig[ZDBG_MAX_BREAKPOINT_BYTES];
+	size_t  orig_len;
 	int temporary;
 	int installed;
 	struct zstop_filter filter;
@@ -56,10 +62,11 @@ struct zbp {
 };
 
 struct zbp_table {
+	const struct zarch_ops *arch;
 	struct zbp bp[ZDBG_MAX_BREAKPOINTS];
 };
 
-void zbp_table_init(struct zbp_table *bt);
+void zbp_table_init(struct zbp_table *bt, const struct zarch_ops *arch);
 int  zbp_alloc(struct zbp_table *bt, zaddr_t addr, int temporary);
 int  zbp_find_by_addr(struct zbp_table *bt, zaddr_t addr);
 int  zbp_install(struct ztarget *t, struct zbp_table *bt, int id);

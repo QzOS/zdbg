@@ -34,6 +34,7 @@ int main(void) { return 0; }
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include "zdbg_arch.h"
 #include "zdbg_bp.h"
 #include "zdbg_target.h"
 #include "zdbg_regs.h"
@@ -82,7 +83,7 @@ main(void)
 	}
 
 	ztarget_init(&tgt);
-	zbp_table_init(&bt);
+	zbp_table_init(&bt, zarch_x86_64());
 
 	argv[0] = (char *)"/bin/sleep";
 	argv[1] = (char *)"30";
