@@ -275,6 +275,9 @@ REPL keeps running.
     check symbol name               symbol resolves (rejects raw numbers)
     check nosymbol name             symbol does not resolve
     check map expr                  address belongs to a known map/region
+    check expr CONDITION            assert condition expression is true
+                                    (same syntax as `cond`, supports
+                                     u8/u16/u32/u64/ptr derefs)
     check patch id applied|reverted patch state matches
     check bp id enabled|disabled|installed|removed
     check bp id hits N|ignore N|cond none|EXPR
@@ -369,6 +372,10 @@ A simple smoke and patch script live under
     trace h ID   [TEXT...]          turn existing hwbp into tracepoint
     printf TEXT...                  print literal text (\n \t \r \\ \"
                                     \xNN escapes; no format substitution)
+    print [/x|/d|/a] EXPR           evaluate EXPR and print its value;
+    eval  [/x|/d|/a] EXPR             supports u8/u16/u32/u64/ptr deref
+                                      (`/x` hex only, `/d` decimal only,
+                                      `/a` add map/region annotation)
     lm [-m|-r] [addr]    list maps/regions or show containing entry
     sym [filter|-r]      list/search loaded ELF symbols, or refresh
     addr expr            show address, nearest symbol, containing map
@@ -427,6 +434,33 @@ module, the expression fails with an ambiguity message.  If a
 symbol is ambiguous (same name in two modules) the expression
 prints `ambiguous symbol: <name>`; qualify with `module:name`
 to pick one.
+
+Value expressions (used by `print`/`eval`, `check expr`, and
+breakpoint conditions) extend the address-expression
+vocabulary with explicit, side-effect-free target-memory
+dereference forms:
+
+    u8(EXPR)    read 1 byte little-endian
+    u16(EXPR)   read 2 bytes little-endian
+    u32(EXPR)   read 4 bytes little-endian
+    u64(EXPR)   read 8 bytes little-endian
+    ptr(EXPR)   read pointer-sized (currently 8 bytes)
+    poi(EXPR)   alias for ptr
+    s8/s16/s32  signed forms, sign-extended to 64 bits
+
+EXPR inside the parentheses uses the same address-expression
+vocabulary and may itself contain another dereference, e.g.
+`u32(ptr(rsp))`.  One outer `+`/`-` arithmetic step is
+supported between value terms (`u32(counter)+1`,
+`100+u32(counter)`, `ptr(rsp)+8`).  Whitespace is allowed
+around the parentheses (`u32 ( counter )`).
+
+Memory dereference expressions are explicit and read-only.
+There is no C parser, no casts, no structs, no arrays, no
+assignment, no boolean operators, no general parentheses,
+and no memory writes through expressions.  Read failure
+prints `cannot read uN at <addr>` and the enclosing command
+or condition fails.
 
 Symbols are refreshed automatically on `l`/`la` and after each
 `lm`.  Use `sym -r` to force a refresh (useful after the
@@ -504,9 +538,11 @@ conservative auto-continue limit (100000 ignored/false hits per
 hot code.  If condition parsing or evaluation fails the
 debugger stops with a diagnostic instead of silently running.
 
-Limitations: no boolean operators (`&&`, `||`), no parentheses,
-no memory dereference in conditions, no command lists, no
-thread-specific conditions.
+Limitations: no boolean operators (`&&`, `||`), no parentheses
+beyond the explicit dereference functions, no command lists,
+no thread-specific conditions.  Conditions accept the same
+target-memory dereference forms as `print`/`check expr`
+(`u8/u16/u32/u64/ptr(EXPR)`).
 
 Breakpoint action lists run a small bounded sequence of
 commands when a hit passes the stop filter.  They are
@@ -524,7 +560,7 @@ ignored/condition-false hits.
 Allowed action commands:
 
     r u d x addr bt lm sym th pl hl b hits check assert
-    expect printf silent continue cont
+    expect printf print eval silent continue cont
 
 Disallowed in action lists (rejected with `action rejected:`):
 

@@ -165,7 +165,7 @@ find_operator(const char *s, int *oplenp)
 }
 
 int
-zcond_eval(const char *s, const struct zregs *regs,
+zcond_eval(const char *s, struct ztarget *t, const struct zregs *regs,
     const struct zmap_table *maps, const struct zsym_table *syms,
     int *resultp)
 {
@@ -206,7 +206,7 @@ zcond_eval(const char *s, const struct zregs *regs,
 	op = find_operator(tmp, &oplen);
 	if (op == NULL) {
 		/* bare expression: nonzero == true */
-		if (zexpr_eval_symbols(tmp, regs, maps, syms, &lhs) < 0)
+		if (zexpr_eval_value(tmp, t, regs, maps, syms, &lhs) < 0)
 			return -1;
 		*resultp = (lhs != 0) ? 1 : 0;
 		return 0;
@@ -224,9 +224,9 @@ zcond_eval(const char *s, const struct zregs *regs,
 	if (copy_operand(rp, rlen, rhsbuf, sizeof(rhsbuf)) < 0)
 		return -1;
 
-	if (zexpr_eval_symbols(lhsbuf, regs, maps, syms, &lhs) < 0)
+	if (zexpr_eval_value(lhsbuf, t, regs, maps, syms, &lhs) < 0)
 		return -1;
-	if (zexpr_eval_symbols(rhsbuf, regs, maps, syms, &rhs) < 0)
+	if (zexpr_eval_value(rhsbuf, t, regs, maps, syms, &rhs) < 0)
 		return -1;
 
 	rc = 0;

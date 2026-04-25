@@ -97,20 +97,20 @@ test_cond_no_operator_truth(void)
 
 	memset(&r, 0, sizeof(r));
 	r.rax = 7;
-	CHECK(zcond_eval("rax", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 
 	res = -1;
 	r.rax = 0;
-	CHECK(zcond_eval("rax", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 0);
 
 	res = -1;
-	CHECK(zcond_eval("#0", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("#0", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 0);
 
 	res = -1;
-	CHECK(zcond_eval("#1", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("#1", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	return 0;
 }
@@ -125,19 +125,19 @@ test_cond_eq_ne(void)
 	r.rax = 0x10;
 	r.rdi = 3;
 
-	CHECK(zcond_eval("rax == 10", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax == 10", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
-	CHECK(zcond_eval("rax==10", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax==10", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
-	CHECK(zcond_eval("rax != 10", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax != 10", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 0);
 	res = -1;
-	CHECK(zcond_eval("rdi == #3", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rdi == #3", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
-	CHECK(zcond_eval("rdi != #2", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rdi != #2", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	return 0;
 }
@@ -151,19 +151,19 @@ test_cond_lt_le_gt_ge(void)
 	memset(&r, 0, sizeof(r));
 	r.rax = 5;
 
-	CHECK(zcond_eval("rax < #6", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax < #6", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
-	CHECK(zcond_eval("rax <= #5", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax <= #5", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
-	CHECK(zcond_eval("rax > #5", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax > #5", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 0);
 	res = -1;
-	CHECK(zcond_eval("rax >= #5", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax >= #5", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
-	CHECK(zcond_eval("rax<#100", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rax<#100", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	return 0;
 }
@@ -176,12 +176,12 @@ test_cond_invalid(void)
 
 	memset(&r, 0, sizeof(r));
 	/* unknown register */
-	CHECK(zcond_eval("nopereg == 0", &r, NULL, NULL, &res) < 0);
+	CHECK(zcond_eval("nopereg == 0", NULL, &r, NULL, NULL, &res) < 0);
 	/* empty operand */
-	CHECK(zcond_eval("== 5", &r, NULL, NULL, &res) < 0);
-	CHECK(zcond_eval("rax ==", &r, NULL, NULL, &res) < 0);
-	CHECK(zcond_eval("", &r, NULL, NULL, &res) < 0);
-	CHECK(zcond_eval(NULL, &r, NULL, NULL, &res) < 0);
+	CHECK(zcond_eval("== 5", NULL, &r, NULL, NULL, &res) < 0);
+	CHECK(zcond_eval("rax ==", NULL, &r, NULL, NULL, &res) < 0);
+	CHECK(zcond_eval("", NULL, &r, NULL, NULL, &res) < 0);
+	CHECK(zcond_eval(NULL, NULL, &r, NULL, NULL, &res) < 0);
 	return 0;
 }
 
@@ -194,11 +194,11 @@ test_cond_register_offset(void)
 	memset(&r, 0, sizeof(r));
 	r.rip = 0x401000;
 
-	CHECK(zcond_eval("rip == 401000", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rip == 401000", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	res = -1;
 	/* unsigned compare: rsp 0 < 0x100 */
-	CHECK(zcond_eval("rsp < 100", &r, NULL, NULL, &res) == 0);
+	CHECK(zcond_eval("rsp < 100", NULL, &r, NULL, NULL, &res) == 0);
 	CHECK(res == 1);
 	return 0;
 }

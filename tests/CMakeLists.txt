@@ -26,6 +26,10 @@ add_executable(test_expr_maps test_expr_maps.c)
 target_link_libraries(test_expr_maps PRIVATE zdbg_core)
 add_test(NAME test_expr_maps COMMAND test_expr_maps)
 
+add_executable(test_expr_value test_expr_value.c)
+target_link_libraries(test_expr_value PRIVATE zdbg_core)
+add_test(NAME test_expr_value COMMAND test_expr_value)
+
 add_executable(test_symbols test_symbols.c)
 target_link_libraries(test_symbols PRIVATE zdbg_core)
 add_test(NAME test_symbols COMMAND test_symbols)

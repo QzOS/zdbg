@@ -188,6 +188,8 @@ static const char *const allowed_cmds[] = {
 	"assert",
 	"expect",
 	"printf",
+	"print",
+	"eval",
 	"silent",
 	"continue",
 	"cont",
